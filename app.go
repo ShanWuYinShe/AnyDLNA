@@ -99,7 +99,7 @@ func (a *App) shutdown(ctx context.Context) {
 // SearchDevices 搜索局域网内的 DLNA 渲染设备（电视、盒子等）。
 func (a *App) SearchDevices(timeoutMS int) ([]DeviceInfo, error) {
 	if timeoutMS <= 0 || timeoutMS > 15000 {
-		timeoutMS = 4000
+		timeoutMS = 6000
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMS)*time.Millisecond)
 	defer cancel()
@@ -123,6 +123,45 @@ func (a *App) SearchDevices(timeoutMS int) ([]DeviceInfo, error) {
 		out = append(out, DeviceInfo{UDN: d.UDN, Name: name, Model: model, Host: hostOf(d.Location)})
 	}
 	return out, nil
+}
+
+// AddDeviceManually 在 SSDP 发现失效时按 IP:端口 手动添加渲染设备。
+// 不带端口时自动尝试常见 UPnP 描述端口。添加后与搜索结果同等可投屏。
+func (a *App) AddDeviceManually(host string) (*DeviceInfo, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	dev, err := dlna.DescribeByHost(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+
+	a.mu.Lock()
+	if !a.hasDeviceLocked(dev.UDN) {
+		a.devices = append(a.devices, dev)
+	}
+	a.mu.Unlock()
+
+	name := dev.FriendlyName
+	if name == "" {
+		name = dev.UDN
+	}
+	return &DeviceInfo{
+		UDN:   dev.UDN,
+		Name:  name,
+		Model: strings.TrimSpace(dev.Manufacturer + " " + dev.ModelName),
+		Host:  hostOf(dev.Location),
+	}, nil
+}
+
+// hasDeviceLocked 判断设备是否已在最近一次结果中；调用方须持有 a.mu。
+func (a *App) hasDeviceLocked(udn string) bool {
+	for _, d := range a.devices {
+		if d.UDN == udn {
+			return true
+		}
+	}
+	return false
 }
 
 // PickVideo 弹出文件选择框并探测所选视频。

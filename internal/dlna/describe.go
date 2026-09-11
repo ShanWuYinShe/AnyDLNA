@@ -98,6 +98,52 @@ func collectDevice(node *descDevice, base *url.URL, dev *Device) {
 	}
 }
 
+// DescribeByHost 在 SSDP 失效时手动发现设备：并发尝试常见 UPnP 描述地址，
+// 返回第一台具备 AVTransport 的设备。host 可以带端口（如 192.168.1.100:49152）。
+func DescribeByHost(ctx context.Context, host string) (*Device, error) {
+	client := defaultHTTPClient()
+	host = strings.TrimSpace(host)
+	host = strings.TrimPrefix(strings.TrimPrefix(host, "http://"), "https://")
+	host = strings.TrimSuffix(host, "/")
+
+	var candidates []string
+	if !strings.Contains(host, ":") {
+		// 未指定端口：轮询常见 UPnP 端口。
+		for _, port := range []string{"49152", "49153", "49154", "8080", "7676", "36669", "55000", "51423"} {
+			candidates = append(candidates, "http://"+host+":"+port+"/dd.xml", "http://"+host+":"+port+"/")
+		}
+	} else {
+		for _, path := range []string{"/dd.xml", "/description.xml", "/device.xml", "/"} {
+			candidates = append(candidates, "http://"+host+path)
+		}
+	}
+
+	type result struct {
+		dev *Device
+		err error
+	}
+	ch := make(chan result, len(candidates))
+	for _, raw := range candidates {
+		go func(u string) {
+			dev, err := Describe(ctx, client, u)
+			if err == nil && dev.HasAVTransport() {
+				ch <- result{dev: dev}
+				return
+			}
+			ch <- result{err: fmt.Errorf("%s: %v", u, err)}
+		}(raw)
+	}
+	var lastErr error
+	for range candidates {
+		r := <-ch
+		if r.dev != nil {
+			return r.dev, nil
+		}
+		lastErr = r.err
+	}
+	return nil, fmt.Errorf("在 %s 上未发现 DLNA 渲染设备（请确认地址与端口）: %v", host, lastErr)
+}
+
 // resolveReference 将描述中的相对 URL 基于 LOCATION 解析为绝对 URL。
 func resolveReference(base *url.URL, raw string) string {
 	raw = strings.TrimSpace(raw)

@@ -3,6 +3,7 @@ package dlna
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -103,24 +104,52 @@ func TestDescribeCollectsEmbeddedDeviceServices(t *testing.T) {
 	}
 }
 
-func TestParseSSDPResponse(t *testing.T) {
+func TestParseSSDPHeaders(t *testing.T) {
 	raw := []byte("HTTP/1.1 200 OK\r\n" +
 		"CACHE-CONTROL: max-age=1800\r\n" +
 		"LOCATION: http://192.168.1.5:49152/desc.xml\r\n" +
 		"SERVER: Linux UPnP/1.0\r\n" +
 		"ST: urn:schemas-upnp-org:service:AVTransport:1\r\n" +
 		"USN: uuid:abc-123::urn:schemas-upnp-org:service:AVTransport:1\r\n\r\n")
-	dev, ok := parseSSDPResponse(raw)
-	if !ok {
-		t.Fatal("期望解析成功")
+	kind, h := parseSSDPHeaders(raw)
+	if kind != "search-response" {
+		t.Fatalf("kind = %q, 期望 search-response", kind)
 	}
-	if dev.Location != "http://192.168.1.5:49152/desc.xml" {
-		t.Errorf("Location = %q", dev.Location)
+	if h["LOCATION"] != "http://192.168.1.5:49152/desc.xml" {
+		t.Errorf("LOCATION = %q", h["LOCATION"])
 	}
-	if dev.USN != "uuid:abc-123::urn:schemas-upnp-org:service:AVTransport:1" {
-		t.Errorf("USN = %q", dev.USN)
+	if h["USN"] != "uuid:abc-123::urn:schemas-upnp-org:service:AVTransport:1" {
+		t.Errorf("USN = %q", h["USN"])
 	}
-	if _, ok := parseSSDPResponse([]byte("not http")); ok {
-		t.Error("非 HTTP 文本不应解析成功")
+
+	notify := []byte("NOTIFY * HTTP/1.1\r\n" +
+		"HOST: 239.255.255.250:1900\r\n" +
+		"NT: urn:schemas-upnp-org:device:MediaRenderer:1\r\n" +
+		"NTS: ssdp:alive\r\n" +
+		"USN: uuid:xyz::urn:schemas-upnp-org:device:MediaRenderer:1\r\n" +
+		"LOCATION: http://192.168.1.9:49152/dd.xml\r\n\r\n")
+	kind, h = parseSSDPHeaders(notify)
+	if kind != "notify" || !isRendererTarget(h["NT"]) || !strings.EqualFold(h["NTS"], "ssdp:alive") {
+		t.Fatalf("NOTIFY 解析错误: kind=%q h=%v", kind, h)
+	}
+
+	if kind, _ := parseSSDPHeaders([]byte("M-SEARCH * HTTP/1.1\r\nST: ssdp:all\r\n\r\n")); kind != "other" {
+		t.Errorf("自己的 M-SEARCH 应被忽略，得到 %q", kind)
+	}
+}
+
+func TestDescribeByHost(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(sampleRendererDesc))
+	}))
+	defer srv.Close()
+
+	host := strings.TrimPrefix(srv.URL, "http://")
+	dev, err := DescribeByHost(testCtx(), host)
+	if err != nil {
+		t.Fatalf("DescribeByHost 失败: %v", err)
+	}
+	if !dev.HasAVTransport() || dev.FriendlyName != "客厅电视" {
+		t.Fatalf("设备信息错误: %+v", dev)
 	}
 }

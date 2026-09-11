@@ -39,29 +39,45 @@ async function searchDevices() {
     $('deviceList').innerHTML = '';
     state.selectedUDN = null;
     try {
-        const devices = await call('SearchDevices', 5000);
+        const devices = await call('SearchDevices', 6000);
         if (!devices.length) {
-            $('deviceHint').textContent = '未发现设备：请确认电视与电脑在同一网络，且电视的 DLNA 已开启';
+            $('deviceHint').textContent = '未发现设备：请确认电视与电脑在同一网络、电视的 DLNA（多屏互动）开关已打开且电视未息屏；也可在下方输入电视 IP 手动添加';
             return;
         }
         $('deviceHint').textContent = `发现 ${devices.length} 台设备，点击选择`;
-        const list = $('deviceList');
-        devices.forEach((d) => {
-            const li = document.createElement('li');
-            li.className = 'device';
-            li.innerHTML = `<div class="d-name"></div><div class="d-model"></div>`;
-            li.querySelector('.d-name').textContent = d.name;
-            li.querySelector('.d-model').textContent = d.model || d.host;
-            li.onclick = () => {
-                list.querySelectorAll('.device').forEach((x) => x.classList.remove('selected'));
-                li.classList.add('selected');
-                state.selectedUDN = d.udn;
-            };
-            list.appendChild(li);
-        });
+        devices.forEach(addDeviceItem);
     } catch {
         $('deviceHint').textContent = '搜索失败，请重试';
     }
+}
+
+// addDeviceItem 把一台设备渲染进列表并绑定选中事件。
+function addDeviceItem(d) {
+    const list = $('deviceList');
+    const li = document.createElement('li');
+    li.className = 'device';
+    li.innerHTML = `<div class="d-name"></div><div class="d-model"></div>`;
+    li.querySelector('.d-name').textContent = d.name;
+    li.querySelector('.d-model').textContent = d.model || d.host;
+    li.onclick = () => {
+        list.querySelectorAll('.device').forEach((x) => x.classList.remove('selected'));
+        li.classList.add('selected');
+        state.selectedUDN = d.udn;
+    };
+    list.appendChild(li);
+}
+
+async function addDeviceManually() {
+    const host = $('deviceIp').value.trim();
+    if (!host) { toast('请输入电视的 IP 地址'); return; }
+    $('btnAddDevice').disabled = true;
+    try {
+        const d = await call('AddDeviceManually', host);
+        $('deviceHint').textContent = '已手动添加设备，点击选择';
+        addDeviceItem(d);
+        $('deviceIp').value = '';
+    } catch { /* toast 已提示 */ }
+    finally { $('btnAddDevice').disabled = false; }
 }
 
 // ---------- 视频来源（本地文件 / 在线链接）----------
@@ -172,6 +188,8 @@ async function stopCast() {
 // ---------- 事件绑定 ----------
 
 $('btnSearch').onclick = searchDevices;
+$('btnAddDevice').onclick = addDeviceManually;
+$('deviceIp').onkeydown = (e) => { if (e.key === 'Enter') addDeviceManually(); };
 $('btnPick').onclick = pickVideo;
 $('btnResolve').onclick = resolveURL;
 $('urlInput').onkeydown = (e) => { if (e.key === 'Enter') resolveURL(); };
