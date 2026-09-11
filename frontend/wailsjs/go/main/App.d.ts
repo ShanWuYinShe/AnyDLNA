@@ -4,6 +4,8 @@ import {main} from '../models';
 
 export function Cast(arg1:string,arg2:string):Promise<main.CastStatus>;
 
+export function CastURL(arg1:string,arg2:string):Promise<main.CastStatus>;
+
 export function GetCastStatus():Promise<main.CastStatus>;
 
 export function GetVolume():Promise<number>;
@@ -13,6 +15,8 @@ export function PickVideo():Promise<main.PickedVideo>;
 export function PlayPause():Promise<void>;
 
 export function Poll():Promise<main.Position>;
+
+export function ResolveURL(arg1:string):Promise<main.ResolvedInfo>;
 
 export function SearchDevices(arg1:number):Promise<Array<main.DeviceInfo>>;
 

@@ -42,7 +42,17 @@ type CastStatus struct {
 	Active bool   `json:"active"`
 	Device string `json:"device"`
 	File   string `json:"file"`
-	Mode   string `json:"mode"` // direct=原文件直出，transcode=实时转码
+	Mode   string `json:"mode"` // direct=原文件直出，transcode=本地文件转码，stream=在线视频中转
+}
+
+// ResolvedInfo 是在线视频 URL 的解析预览。
+type ResolvedInfo struct {
+	URL         string  `json:"url"`
+	Title       string  `json:"title"`
+	DurationSec float64 `json:"durationSec"`
+	IsLive      bool    `json:"isLive"`
+	Extractor   string  `json:"extractor"`
+	Uploader    string  `json:"uploader"`
 }
 
 // Position 是电视端播放进度快照。
@@ -154,13 +164,7 @@ func (a *App) Cast(udn, path string) (*CastStatus, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	var dev *dlna.Device
-	for _, d := range a.devices {
-		if d.UDN == udn {
-			dev = d
-			break
-		}
-	}
+	dev := a.findDeviceLocked(udn)
 	if dev == nil {
 		return nil, errors.New("设备未找到，请重新搜索")
 	}
@@ -189,11 +193,13 @@ func (a *App) Cast(udn, path string) (*CastStatus, error) {
 	}
 	transcode := info.NeedsTranscode()
 
-	var sessionID string
+	var sessionID, mime, mode string
 	if transcode {
 		sessionID = a.streamSrv.AddTranscode(path, info.Title)
+		mime, mode = "video/mp2t", "transcode"
 	} else {
 		sessionID = a.streamSrv.AddDirect(path, media.MimeTypeFor(path), info.Title)
+		mime, mode = media.MimeTypeFor(path), "direct"
 	}
 	ip, err := netutil.LANIP()
 	if err != nil {
@@ -201,14 +207,84 @@ func (a *App) Cast(udn, path string) (*CastStatus, error) {
 		return nil, fmt.Errorf("获取本机局域网地址失败: %w", err)
 	}
 	playURL := a.streamSrv.URL(ip, sessionID, !transcode)
-	streamMIME := media.MimeTypeFor(path)
-	if transcode {
-		streamMIME = "video/mp2t"
-	}
-	metadata := dlna.BuildDIDLMetadata(info.Title, playURL, streamMIME)
+	return a.startCastLocked(dev, sessionID, info.Title, playURL, mime, mode, ctx)
+}
 
+// ResolveURL 解析在线视频页面地址，返回标题、时长等预览信息。
+func (a *App) ResolveURL(rawURL string) (*ResolvedInfo, error) {
+	if !media.HasYtDlp() {
+		return nil, errors.New("未安装 yt-dlp，无法解析在线视频；请执行 brew install yt-dlp")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	r, err := media.Resolve(ctx, rawURL)
+	if err != nil {
+		return nil, err
+	}
+	return &ResolvedInfo{
+		URL:         rawURL,
+		Title:       r.Title,
+		DurationSec: r.DurationSec,
+		IsLive:      r.IsLive,
+		Extractor:   r.Extractor,
+		Uploader:    r.Uploader,
+	}, nil
+}
+
+// CastURL 把在线视频（YouTube、Bilibili 等视频网站页面或流地址）
+// 经本机 yt-dlp 拉流 + ffmpeg 转码中转后投到指定设备。
+func (a *App) CastURL(udn, rawURL string) (*CastStatus, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	dev := a.findDeviceLocked(udn)
+	if dev == nil {
+		return nil, errors.New("设备未找到，请重新搜索")
+	}
+	if a.streamSrv == nil {
+		return nil, errors.New("流服务未启动")
+	}
+	if !media.HasYtDlp() {
+		return nil, errors.New("未安装 yt-dlp，无法解析在线视频；请执行 brew install yt-dlp")
+	}
+	if !media.HasFFmpeg() {
+		return nil, errors.New("未安装 ffmpeg，无法转码在线视频；请执行 brew install ffmpeg")
+	}
+
+	// 停掉上一次投屏。
+	a.stopCastLocked()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	resolved, err := media.Resolve(ctx, rawURL)
+	if err != nil {
+		return nil, err
+	}
+	sessionID := a.streamSrv.AddTranscodeURL(rawURL, resolved.Title, resolved.IsLive)
+	ip, err := netutil.LANIP()
+	if err != nil {
+		a.streamSrv.Remove(sessionID)
+		return nil, fmt.Errorf("获取本机局域网地址失败: %w", err)
+	}
+	playURL := a.streamSrv.URL(ip, sessionID, false)
+	return a.startCastLocked(dev, sessionID, resolved.Title, playURL, "video/mp2t", "stream", ctx)
+}
+
+// findDeviceLocked 按 UDN 在最近一次搜索结果中查找设备；调用方须持有 a.mu。
+func (a *App) findDeviceLocked(udn string) *dlna.Device {
+	for _, d := range a.devices {
+		if d.UDN == udn {
+			return d
+		}
+	}
+	return nil
+}
+
+// startCastLocked 向设备下发播放地址并登记投屏状态；失败时回收会话。调用方须持有 a.mu。
+func (a *App) startCastLocked(dev *dlna.Device, sessionID, title, playURL, streamMIME, mode string, ctx context.Context) (*CastStatus, error) {
 	renderer := dlna.NewRenderer(dev)
-	if err := renderer.SetAVTransportURI(ctx, playURL, metadata); err != nil {
+	if err := renderer.SetAVTransportURI(ctx, playURL, dlna.BuildDIDLMetadata(title, playURL, streamMIME)); err != nil {
 		a.streamSrv.Remove(sessionID)
 		return nil, fmt.Errorf("下发播放地址失败: %w", err)
 	}
@@ -216,16 +292,11 @@ func (a *App) Cast(udn, path string) (*CastStatus, error) {
 		a.streamSrv.Remove(sessionID)
 		return nil, fmt.Errorf("启动播放失败: %w", err)
 	}
-
 	a.renderer = renderer
 	a.sessionID = sessionID
-	a.castFile = info.Title
-	if transcode {
-		a.castMode = "transcode"
-	} else {
-		a.castMode = "direct"
-	}
-	return &CastStatus{Active: true, Device: dev.FriendlyName, File: info.Title, Mode: a.castMode}, nil
+	a.castFile = title
+	a.castMode = mode
+	return &CastStatus{Active: true, Device: dev.FriendlyName, File: title, Mode: mode}, nil
 }
 
 // PlayPause 切换播放/暂停。
@@ -282,10 +353,11 @@ func (a *App) SeekTo(sec float64) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if a.castMode != "transcode" {
+	if a.castMode == "direct" {
 		return a.renderer.Seek(ctx, dlna.SeekUnitABSTime, dlna.FormatClock(sec))
 	}
-	// 转码流不支持随机拖动：让 ffmpeg 从新位置重启，并让电视端重新拉流。
+	// 转码流（本地转码/在线中转）不支持随机拖动：让转码进程从新位置重启，
+	// 并让电视端重新拉流。
 	if err := a.streamSrv.SetTranscodeOffset(a.sessionID, sec); err != nil {
 		return err
 	}

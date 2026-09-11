@@ -81,6 +81,16 @@ body {
 .video-badge.ok { color: var(--ok); background: rgba(52, 201, 142, .12); }
 .video-badge.tc { color: var(--warn); background: rgba(245, 166, 35, .12); }
 
+/* URL 输入行 */
+.url-row { display: flex; gap: 8px; }
+.url-input {
+    flex: 1; background: var(--panel-2); color: var(--text);
+    border: 1px solid #3a3f52; border-radius: 8px;
+    padding: 9px 12px; font-size: 13px; outline: none;
+}
+.url-input:focus { border-color: var(--accent); }
+.url-input::placeholder { color: var(--text-dim); }
+
 /* 按钮 */
 .btn {
     background: var(--panel-2); color: var(--text);

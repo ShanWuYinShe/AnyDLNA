@@ -26,8 +26,12 @@
 
         <section class="panel">
             <div class="panel-head">
-                <h2>视频文件</h2>
-                <button class="btn primary" id="btnPick">选择视频</button>
+                <h2>视频来源</h2>
+                <button class="btn primary" id="btnPick">选择本地视频</button>
+            </div>
+            <div class="url-row">
+                <input class="url-input" id="urlInput" placeholder="粘贴视频链接：YouTube / Bilibili / m3u8 / mp4…"/>
+                <button class="btn" id="btnResolve">解析</button>
             </div>
             <div class="video-card hidden" id="videoCard">
                 <div class="video-name" id="vName"></div>
@@ -35,7 +39,7 @@
                 <div class="video-badge" id="vBadge"></div>
                 <button class="btn primary big" id="btnCast">投屏到选中设备</button>
             </div>
-            <div class="hint" id="videoHint">支持任意视频格式；电视端解不动的会自动用 ffmpeg 转码</div>
+            <div class="hint" id="videoHint">本地视频任意格式；在线视频由本机解析转码后中转，电视端无需支持该网站</div>
         </section>
     </main>
 

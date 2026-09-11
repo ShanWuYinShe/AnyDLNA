@@ -4,7 +4,7 @@ const $ = (id) => document.getElementById(id);
 
 const state = {
     selectedUDN: null,
-    picked: null,        // PickVideo 返回的视频信息
+    pending: null,       // 待投屏来源：{type:'file'|'url', path/url, name, durationSec, ...}
     polling: null,       // 轮询定时器
     scrubbing: false,    // 用户正在拖动进度条
     stoppedCount: 0,     // 连续 STOPPED 次数，用于判定投屏结束
@@ -64,28 +64,57 @@ async function searchDevices() {
     }
 }
 
-// ---------- 视频 ----------
+// ---------- 视频来源（本地文件 / 在线链接）----------
 
 async function pickVideo() {
     const v = await call('PickVideo');
     if (!v) return; // 用户取消
-    state.picked = v;
+    state.pending = { type: 'file', ...v };
+    renderPending();
+}
+
+async function resolveURL() {
+    const url = $('urlInput').value.trim();
+    if (!url) { toast('请先粘贴视频链接'); return; }
+    $('btnResolve').disabled = true;
+    try {
+        const r = await call('ResolveURL', url);
+        state.pending = { type: 'url', ...r };
+        renderPending();
+    } catch { /* toast 已提示 */ }
+    finally { $('btnResolve').disabled = false; }
+}
+
+function renderPending() {
+    const p = state.pending;
+    if (!p) return;
     $('videoCard').classList.remove('hidden');
     $('videoHint').classList.add('hidden');
-    $('vName').textContent = v.name;
-    const res = v.width ? `${v.width}×${v.height} · ` : '';
-    $('vMeta').textContent = `${res}${v.videoCodec || '?'} + ${v.audioCodec || '无声'} · ${fmtClock(v.durationSec)} · ${v.sizeMB.toFixed(0)} MB`;
-    $('vBadge').textContent = v.directPlay ? '电视可直接解码，原文件直出' : '需要转码（H.264/AAC MPEG-TS 实时转码）';
-    $('vBadge').className = 'video-badge ' + (v.directPlay ? 'ok' : 'tc');
+    $('vName').textContent = p.name || p.title || '未命名';
+    if (p.type === 'file') {
+        const res = p.width ? `${p.width}×${p.height} · ` : '';
+        $('vMeta').textContent = `本地文件 · ${res}${p.videoCodec || '?'} + ${p.audioCodec || '无声'} · ${fmtClock(p.durationSec)} · ${p.sizeMB.toFixed(0)} MB`;
+        $('vBadge').textContent = p.directPlay ? '电视可直接解码，原文件直出' : '本地文件需转码（H.264/AAC MPEG-TS 实时转码）';
+        $('vBadge').className = 'video-badge ' + (p.directPlay ? 'ok' : 'tc');
+    } else {
+        const from = p.extractor ? `来源 ${p.extractor}` : '在线视频';
+        const dur = p.isLive ? '直播' : fmtClock(p.durationSec);
+        $('vMeta').textContent = `${from}${p.uploader ? ' · ' + p.uploader : ''} · ${dur}`;
+        $('vBadge').textContent = '在线视频经本机解析转码中转';
+        $('vBadge').className = 'video-badge tc';
+    }
 }
 
 // ---------- 投屏 ----------
 
 async function cast() {
     if (!state.selectedUDN) { toast('请先选择一台播放设备'); return; }
-    if (!state.picked) { toast('请先选择视频文件'); return; }
+    const p = state.pending;
+    if (!p) { toast('请先选择本地视频或解析在线链接'); return; }
     try {
-        const st = await call('Cast', state.selectedUDN, state.picked.path);
+        const st = p.type === 'file'
+            ? await call('Cast', state.selectedUDN, p.path)
+            : await call('CastURL', state.selectedUDN, p.url);
         startControls(st);
     } catch { /* toast 已提示 */ }
 }
@@ -144,6 +173,8 @@ async function stopCast() {
 
 $('btnSearch').onclick = searchDevices;
 $('btnPick').onclick = pickVideo;
+$('btnResolve').onclick = resolveURL;
+$('urlInput').onkeydown = (e) => { if (e.key === 'Enter') resolveURL(); };
 $('btnCast').onclick = cast;
 $('btnStop').onclick = stopCast;
 $('btnPlayPause').onclick = () => call('PlayPause').catch(() => {});

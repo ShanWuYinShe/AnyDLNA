@@ -79,9 +79,14 @@ func (s *StreamServer) AddDirect(path, mime, title string) string {
 	return s.add(&session{id: newSessionID(), path: path, direct: true, mime: mime, title: title})
 }
 
-// AddTranscode 注册转码会话，返回会话 ID。
+// AddTranscode 注册本地文件转码会话，返回会话 ID。
 func (s *StreamServer) AddTranscode(path, title string) string {
 	return s.add(&session{id: newSessionID(), path: path, direct: false, mime: mpegtsMIME, title: title, tc: NewTranscoder(path)})
+}
+
+// AddTranscodeURL 注册在线视频转码会话：yt-dlp 解析拉流，ffmpeg 转码为 MPEG-TS。
+func (s *StreamServer) AddTranscodeURL(url, title string, isLive bool) string {
+	return s.add(&session{id: newSessionID(), direct: false, mime: mpegtsMIME, title: title, tc: NewURLTranscoder(url, isLive)})
 }
 
 func (s *StreamServer) add(sess *session) string {
@@ -148,22 +153,43 @@ func (s *StreamServer) serveTranscode(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", mpegtsMIME)
 	w.Header().Set("Connection", "close")
 	w.WriteHeader(http.StatusOK)
+	// 主动 flush，让电视端尽快收到数据开始起播。
+	flushWriter{w}.flushHeader()
 
-	cancel, err := sess.tc.StreamTo(w)
+	cancel, done, err := sess.tc.StreamTo(flushWriter{w})
 	if err != nil {
 		// 响应头已发出，只能中断连接；电视端表现为无法播放。
 		log.Printf("转码启动失败: %v", err)
 		return
 	}
-	// 电视端断开（停止播放/换台/Seek）时终止 ffmpeg。
-	go func() {
-		select {
-		case <-r.Context().Done():
-			cancel()
-		case <-time.After(12 * time.Hour):
-			cancel()
-		}
-	}()
+	// 阻塞保持响应打开：客户端断开（停止/Seek）或转码进程退出（播放完毕）时结束。
+	select {
+	case <-r.Context().Done():
+	case <-done:
+	}
+	cancel()
+	if sess.tc.stderr != nil && sess.tc.stderr.Len() > 0 {
+		log.Printf("转码进程输出: %s", sess.tc.stderr.String())
+	}
+}
+
+// flushWriter 在每次写入后主动 Flush，把转码输出尽快推给电视端。
+type flushWriter struct {
+	w http.ResponseWriter
+}
+
+func (f flushWriter) Write(p []byte) (int, error) {
+	n, err := f.w.Write(p)
+	if flusher, ok := f.w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	return n, err
+}
+
+func (f flushWriter) flushHeader() {
+	if flusher, ok := f.w.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 // sessionByPath 按 /f/{id} 或 /t/{id} 路径取出会话。

@@ -80,6 +80,28 @@ export namespace main {
 	        this.state = source["state"];
 	    }
 	}
+	export class ResolvedInfo {
+	    url: string;
+	    title: string;
+	    durationSec: number;
+	    isLive: boolean;
+	    extractor: string;
+	    uploader: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ResolvedInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.url = source["url"];
+	        this.title = source["title"];
+	        this.durationSec = source["durationSec"];
+	        this.isLive = source["isLive"];
+	        this.extractor = source["extractor"];
+	        this.uploader = source["uploader"];
+	    }
+	}
 
 }
 

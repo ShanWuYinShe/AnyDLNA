@@ -6,6 +6,10 @@ export function Cast(arg1, arg2) {
   return window['go']['main']['App']['Cast'](arg1, arg2);
 }
 
+export function CastURL(arg1, arg2) {
+  return window['go']['main']['App']['CastURL'](arg1, arg2);
+}
+
 export function GetCastStatus() {
   return window['go']['main']['App']['GetCastStatus']();
 }
@@ -24,6 +28,10 @@ export function PlayPause() {
 
 export function Poll() {
   return window['go']['main']['App']['Poll']();
+}
+
+export function ResolveURL(arg1) {
+  return window['go']['main']['App']['ResolveURL'](arg1);
 }
 
 export function SearchDevices(arg1) {
