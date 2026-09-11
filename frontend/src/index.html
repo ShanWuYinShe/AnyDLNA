@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8"/>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+    <title>AnyDLNA</title>
+    <link href="/main.css" rel="stylesheet"/>
+</head>
+
+<body>
+<div id="app">
+    <header class="topbar">
+        <div class="brand">AnyDLNA <span class="sub">本地视频投屏</span></div>
+        <div class="status-dot" id="castDot"></div>
+    </header>
+
+    <main class="content">
+        <section class="panel">
+            <div class="panel-head">
+                <h2>播放设备</h2>
+                <button class="btn" id="btnSearch">搜索设备</button>
+            </div>
+            <ul class="device-list" id="deviceList"></ul>
+            <div class="hint" id="deviceHint">点击「搜索设备」查找局域网内的电视 / 盒子</div>
+        </section>
+
+        <section class="panel">
+            <div class="panel-head">
+                <h2>视频文件</h2>
+                <button class="btn primary" id="btnPick">选择视频</button>
+            </div>
+            <div class="video-card hidden" id="videoCard">
+                <div class="video-name" id="vName"></div>
+                <div class="video-meta" id="vMeta"></div>
+                <div class="video-badge" id="vBadge"></div>
+                <button class="btn primary big" id="btnCast">投屏到选中设备</button>
+            </div>
+            <div class="hint" id="videoHint">支持任意视频格式；电视端解不动的会自动用 ffmpeg 转码</div>
+        </section>
+    </main>
+
+    <footer class="controls hidden" id="controls">
+        <span class="cast-title" id="castTitle"></span>
+        <div class="ctrl-btns">
+            <button class="btn" id="btnPlayPause">暂停</button>
+            <button class="btn danger" id="btnStop">停止</button>
+        </div>
+        <span class="time" id="curTime">0:00:00</span>
+        <input class="seek" id="seek" max="1000" min="0" type="range" value="0"/>
+        <span class="time" id="durTime">0:00:00</span>
+        <span class="vol-icon">音量</span>
+        <input class="vol" id="vol" max="100" min="0" type="range" value="100"/>
+    </footer>
+
+    <div class="toast hidden" id="toast"></div>
+</div>
+<script src="/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,164 @@
+// AnyDLNA 前端逻辑：通过 window.go.main.App 调用 Go 绑定方法。
+
+const $ = (id) => document.getElementById(id);
+
+const state = {
+    selectedUDN: null,
+    picked: null,        // PickVideo 返回的视频信息
+    polling: null,       // 轮询定时器
+    scrubbing: false,    // 用户正在拖动进度条
+    stoppedCount: 0,     // 连续 STOPPED 次数，用于判定投屏结束
+};
+
+function toast(msg, ms = 3600) {
+    const el = $('toast');
+    el.textContent = msg;
+    el.classList.remove('hidden');
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => el.classList.add('hidden'), ms);
+}
+
+function fmtClock(sec) {
+    sec = Math.max(0, Math.floor(sec || 0));
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+function call(method, ...args) {
+    return window.go.main.App[method](...args).catch((err) => {
+        const msg = typeof err === 'string' ? err : (err && err.message) || JSON.stringify(err);
+        toast(msg);
+        throw err;
+    });
+}
+
+// ---------- 设备 ----------
+
+async function searchDevices() {
+    $('deviceHint').textContent = '正在搜索局域网设备…';
+    $('deviceList').innerHTML = '';
+    state.selectedUDN = null;
+    try {
+        const devices = await call('SearchDevices', 5000);
+        if (!devices.length) {
+            $('deviceHint').textContent = '未发现设备：请确认电视与电脑在同一网络，且电视的 DLNA 已开启';
+            return;
+        }
+        $('deviceHint').textContent = `发现 ${devices.length} 台设备，点击选择`;
+        const list = $('deviceList');
+        devices.forEach((d) => {
+            const li = document.createElement('li');
+            li.className = 'device';
+            li.innerHTML = `<div class="d-name"></div><div class="d-model"></div>`;
+            li.querySelector('.d-name').textContent = d.name;
+            li.querySelector('.d-model').textContent = d.model || d.host;
+            li.onclick = () => {
+                list.querySelectorAll('.device').forEach((x) => x.classList.remove('selected'));
+                li.classList.add('selected');
+                state.selectedUDN = d.udn;
+            };
+            list.appendChild(li);
+        });
+    } catch {
+        $('deviceHint').textContent = '搜索失败，请重试';
+    }
+}
+
+// ---------- 视频 ----------
+
+async function pickVideo() {
+    const v = await call('PickVideo');
+    if (!v) return; // 用户取消
+    state.picked = v;
+    $('videoCard').classList.remove('hidden');
+    $('videoHint').classList.add('hidden');
+    $('vName').textContent = v.name;
+    const res = v.width ? `${v.width}×${v.height} · ` : '';
+    $('vMeta').textContent = `${res}${v.videoCodec || '?'} + ${v.audioCodec || '无声'} · ${fmtClock(v.durationSec)} · ${v.sizeMB.toFixed(0)} MB`;
+    $('vBadge').textContent = v.directPlay ? '电视可直接解码，原文件直出' : '需要转码（H.264/AAC MPEG-TS 实时转码）';
+    $('vBadge').className = 'video-badge ' + (v.directPlay ? 'ok' : 'tc');
+}
+
+// ---------- 投屏 ----------
+
+async function cast() {
+    if (!state.selectedUDN) { toast('请先选择一台播放设备'); return; }
+    if (!state.picked) { toast('请先选择视频文件'); return; }
+    try {
+        const st = await call('Cast', state.selectedUDN, state.picked.path);
+        startControls(st);
+    } catch { /* toast 已提示 */ }
+}
+
+function startControls(st) {
+    $('controls').classList.remove('hidden');
+    $('castDot').classList.add('on');
+    $('castTitle').textContent = `${st.device} · ${st.file}`;
+    $('btnPlayPause').textContent = '暂停';
+    if (state.polling) clearInterval(state.polling);
+    state.stoppedCount = 0;
+    state.polling = setInterval(poll, 1000);
+    poll();
+    window.go.main.App.GetVolume()
+        .then((v) => { $('vol').value = v; })
+        .catch(() => { /* 设备可能不支持音量控制 */ });
+}
+
+async function poll() {
+    let p;
+    try {
+        p = await window.go.main.App.Poll();
+    } catch {
+        return;
+    }
+    if (!p || !p.state) { // 已停止投屏
+        stopControls();
+        return;
+    }
+    if (p.state === 'PLAYING' || p.state === 'PAUSED_PLAYBACK') {
+        state.stoppedCount = 0;
+        $('btnPlayPause').textContent = p.state === 'PLAYING' ? '暂停' : '播放';
+        if (!state.scrubbing) {
+            $('seek').max = Math.max(1, Math.round(p.durationSec));
+            $('seek').value = Math.round(p.positionSec);
+            $('curTime').textContent = fmtClock(p.positionSec);
+            $('durTime').textContent = fmtClock(p.durationSec);
+        }
+    } else if (p.state === 'STOPPED' && ++state.stoppedCount >= 3) {
+        stopControls();
+    }
+}
+
+function stopControls() {
+    if (state.polling) { clearInterval(state.polling); state.polling = null; }
+    $('controls').classList.add('hidden');
+    $('castDot').classList.remove('on');
+}
+
+async function stopCast() {
+    await call('StopCast').catch(() => {});
+    stopControls();
+}
+
+// ---------- 事件绑定 ----------
+
+$('btnSearch').onclick = searchDevices;
+$('btnPick').onclick = pickVideo;
+$('btnCast').onclick = cast;
+$('btnStop').onclick = stopCast;
+$('btnPlayPause').onclick = () => call('PlayPause').catch(() => {});
+
+const seek = $('seek');
+seek.oninput = () => { state.scrubbing = true; };
+seek.onchange = () => {
+    call('SeekTo', Number(seek.value))
+        .catch(() => {})
+        .finally(() => { state.scrubbing = false; });
+};
+
+let volTimer = null;
+$('vol').onchange = () => call('SetVolume', Number($('vol').value)).catch(() => {});
+$('vol').oninput = () => {
+    clearTimeout(volTimer);
+    volTimer = setTimeout(() => call('SetVolume', Number($('vol').value)).catch(() => {}), 300);
+};

@@ -1,0 +1,10 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "AnyDLNA",
+  "outputfilename": "any_dlna",
+  "wailsjsdir": "./frontend",
+  "author": {
+    "name": "winliyou",
+    "email": "winliyou@outlook.com"
+  }
+}
