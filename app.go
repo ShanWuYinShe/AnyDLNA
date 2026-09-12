@@ -118,6 +118,10 @@ func (a *App) startup(ctx context.Context) {
 	a.cfg = media.LoadConfig()
 	a.mu.Unlock()
 
+	// 启动自检：记录外部工具的实际解析结果。GUI 应用不继承 shell 的 PATH，
+	// 工具「装了却找不到」是最容易误判的一类问题，这里留下可核对的依据。
+	a.logf("外部工具: %s", media.ToolStatus())
+
 	srv, err := media.NewStreamServer()
 	if err != nil {
 		runtime.LogErrorf(ctx, "启动流服务失败: %v", err)

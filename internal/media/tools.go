@@ -149,6 +149,23 @@ func existingToolDirs() []string {
 	return out
 }
 
+// ToolStatus 返回外部工具解析结果的一行摘要，用于启动自检。
+//
+// 之所以要在启动时记录：GUI 应用找不到外部工具时，界面上只会看到
+// 「未找到 yt-dlp」，用户无法判断是没装、还是应用没找到。
+// 启动日志直接给出每个工具的最终路径（或「未找到」），可一眼定位。
+func ToolStatus() string {
+	parts := make([]string, 0, 3)
+	for _, name := range []string{"yt-dlp", "ffmpeg", "ffprobe"} {
+		if p, ok := ResolveTool(name); ok {
+			parts = append(parts, name+"="+p)
+		} else {
+			parts = append(parts, name+"=未找到")
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
 // MissingToolError 返回外部工具缺失时的可操作错误。
 // name 取 "yt-dlp" / "ffmpeg" / "ffprobe"。
 //

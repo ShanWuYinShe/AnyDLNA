@@ -160,6 +160,37 @@ func TestResolveToolUnknownName(t *testing.T) {
 	}
 }
 
+// TestToolStatusReportsEachTool 确认启动自检会逐个报告三个工具的解析结果，
+// 且未找到时明确标注，而不是留空让人误以为没问题。
+func TestToolStatusReportsEachTool(t *testing.T) {
+	t.Setenv("PATH", minimalGUIPath)
+	t.Setenv(envYtDlpPath, "")
+	t.Setenv(envFFmpegPath, "")
+	t.Setenv(envFFprobePath, "")
+
+	got := ToolStatus()
+	t.Logf("启动自检输出: %s", got)
+
+	for _, name := range []string{"yt-dlp", "ffmpeg", "ffprobe"} {
+		if !strings.Contains(got, name+"=") {
+			t.Errorf("应包含 %s 的解析结果: %q", name, got)
+		}
+	}
+	// 恰好报告三个工具，避免拼装时漏项。
+	if n := strings.Count(got, "="); n != 3 {
+		t.Errorf("应恰好报告三个工具，实际 %d 项: %q", n, got)
+	}
+	// 本机装了工具时，应给出路径而不是「未找到」。
+	for _, name := range []string{"yt-dlp", "ffmpeg", "ffprobe"} {
+		if _, ok := ResolveTool(name); !ok {
+			continue
+		}
+		if strings.Contains(got, name+"=未找到") {
+			t.Errorf("%s 可解析，但自检报未找到: %q", name, got)
+		}
+	}
+}
+
 // containsString 判断切片是否包含指定元素。
 func containsString(list []string, want string) bool {
 	for _, v := range list {
