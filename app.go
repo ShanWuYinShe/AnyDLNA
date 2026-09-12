@@ -64,11 +64,12 @@ type Position struct {
 
 // App 是绑定给前端的应用层。
 type App struct {
-	ctx       context.Context
-	streamSrv *media.StreamServer
+	ctx           context.Context
+	streamSrv     *media.StreamServer
+	watcherCancel context.CancelFunc
 
 	mu        sync.Mutex
-	devices   []*dlna.Device // 最近一次搜索到的渲染设备
+	devices   []*dlna.Device // 已发现的渲染设备（搜索结果 + 被动监听累积）
 	renderer  *dlna.Renderer // 当前投屏目标
 	sessionID string         // 当前流会话 ID
 	castFile  string
@@ -78,7 +79,7 @@ type App struct {
 // NewApp 创建应用实例。
 func NewApp() *App { return &App{} }
 
-// startup 在应用启动时创建流服务。
+// startup 在应用启动时创建流服务并开启设备广播常驻监听。
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	srv, err := media.NewStreamServer()
@@ -87,16 +88,49 @@ func (a *App) startup(ctx context.Context) {
 		return
 	}
 	a.streamSrv = srv
+
+	watchCtx, cancel := context.WithCancel(context.Background())
+	a.watcherCancel = cancel
+	if err := dlna.WatchRenderers(watchCtx, func(dev *dlna.Device) {
+		a.mu.Lock()
+		isNew := !a.hasDeviceLocked(dev.UDN)
+		if isNew {
+			a.devices = append(a.devices, dev)
+		}
+		a.mu.Unlock()
+		if isNew {
+			runtime.EventsEmit(a.ctx, "device:discovered", deviceInfoOf(dev))
+		}
+	}); err != nil {
+		runtime.LogWarningf(ctx, "设备广播监听未启动（不影响手动搜索）: %v", err)
+	}
 }
 
-// shutdown 在应用退出时清理流服务与转码进程。
+// shutdown 在应用退出时清理流服务、监听与转码进程。
 func (a *App) shutdown(ctx context.Context) {
+	if a.watcherCancel != nil {
+		a.watcherCancel()
+	}
 	if a.streamSrv != nil {
 		a.streamSrv.Close()
 	}
 }
 
-// SearchDevices 搜索局域网内的 DLNA 渲染设备（电视、盒子等）。
+// deviceInfoOf 转换设备为前端展示结构。
+func deviceInfoOf(d *dlna.Device) DeviceInfo {
+	name := d.FriendlyName
+	if name == "" {
+		name = d.UDN
+	}
+	return DeviceInfo{
+		UDN:   d.UDN,
+		Name:  name,
+		Model: strings.TrimSpace(d.Manufacturer + " " + d.ModelName),
+		Host:  hostOf(d.Location),
+	}
+}
+
+// SearchDevices 主动搜索局域网内的 DLNA 渲染设备，并合并常驻监听已发现的设备。
 func (a *App) SearchDevices(timeoutMS int) ([]DeviceInfo, error) {
 	if timeoutMS <= 0 || timeoutMS > 15000 {
 		timeoutMS = 6000
@@ -110,17 +144,26 @@ func (a *App) SearchDevices(timeoutMS int) ([]DeviceInfo, error) {
 	}
 
 	a.mu.Lock()
-	a.devices = devices
+	merged := make([]*dlna.Device, 0, len(devices)+len(a.devices))
+	seen := map[string]bool{}
+	for _, d := range devices {
+		if !seen[d.UDN] {
+			seen[d.UDN] = true
+			merged = append(merged, d)
+		}
+	}
+	for _, d := range a.devices {
+		if !seen[d.UDN] {
+			seen[d.UDN] = true
+			merged = append(merged, d)
+		}
+	}
+	a.devices = merged
 	a.mu.Unlock()
 
-	out := make([]DeviceInfo, 0, len(devices))
-	for _, d := range devices {
-		name := d.FriendlyName
-		if name == "" {
-			name = d.UDN
-		}
-		model := strings.TrimSpace(d.Manufacturer + " " + d.ModelName)
-		out = append(out, DeviceInfo{UDN: d.UDN, Name: name, Model: model, Host: hostOf(d.Location)})
+	out := make([]DeviceInfo, 0, len(merged))
+	for _, d := range merged {
+		out = append(out, deviceInfoOf(d))
 	}
 	return out, nil
 }
@@ -142,16 +185,8 @@ func (a *App) AddDeviceManually(host string) (*DeviceInfo, error) {
 	}
 	a.mu.Unlock()
 
-	name := dev.FriendlyName
-	if name == "" {
-		name = dev.UDN
-	}
-	return &DeviceInfo{
-		UDN:   dev.UDN,
-		Name:  name,
-		Model: strings.TrimSpace(dev.Manufacturer + " " + dev.ModelName),
-		Host:  hostOf(dev.Location),
-	}, nil
+	info := deviceInfoOf(dev)
+	return &info, nil
 }
 
 // hasDeviceLocked 判断设备是否已在最近一次结果中；调用方须持有 a.mu。

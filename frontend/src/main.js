@@ -41,7 +41,7 @@ async function searchDevices() {
     try {
         const devices = await call('SearchDevices', 6000);
         if (!devices.length) {
-            $('deviceHint').textContent = '未发现设备：请确认电视与电脑在同一网络、电视的 DLNA（多屏互动）开关已打开且电视未息屏；也可在下方输入电视 IP 手动添加';
+            $('deviceHint').textContent = '未发现设备：应用会持续监听电视广播，设备上线后会自动出现在列表；也可在下方输入电视 IP 手动添加';
             return;
         }
         $('deviceHint').textContent = `发现 ${devices.length} 台设备，点击选择`;
@@ -51,11 +51,15 @@ async function searchDevices() {
     }
 }
 
-// addDeviceItem 把一台设备渲染进列表并绑定选中事件。
+// addDeviceItem 把一台设备渲染进列表并绑定选中事件；同一设备（UDN）不重复添加。
 function addDeviceItem(d) {
     const list = $('deviceList');
+    if (list.querySelector(`li[data-udn="${CSS.escape(d.udn)}"]`)) {
+        return;
+    }
     const li = document.createElement('li');
     li.className = 'device';
+    li.dataset.udn = d.udn;
     li.innerHTML = `<div class="d-name"></div><div class="d-model"></div>`;
     li.querySelector('.d-name').textContent = d.name;
     li.querySelector('.d-model').textContent = d.model || d.host;
@@ -78,6 +82,15 @@ async function addDeviceManually() {
         $('deviceIp').value = '';
     } catch { /* toast 已提示 */ }
     finally { $('btnAddDevice').disabled = false; }
+}
+
+// 常驻监听：电视上线广播时由后端推送，设备自动出现在列表里。
+if (window.runtime && window.runtime.EventsOn) {
+    window.runtime.EventsOn('device:discovered', (d) => {
+        addDeviceItem(d);
+        $('deviceHint').textContent = '已自动发现新设备，点击选择';
+        toast('发现新设备：' + d.name);
+    });
 }
 
 // ---------- 视频来源（本地文件 / 在线链接）----------

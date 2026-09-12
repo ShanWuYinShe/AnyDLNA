@@ -74,7 +74,13 @@ func searchDevices(ctx context.Context, timeout time.Duration) ([]rawDevice, err
 	// 多轮发送 M-SEARCH，留下余量时间接收响应（设备按 MX 随机延迟应答）。
 	sendRound := func() {
 		for _, conn := range sockets {
-			for _, st := range []string{AVTransportServiceType, "ssdp:all"} {
+			// 多种目标类型并发搜索：部分设备只对特定 ST 应答。
+			for _, st := range []string{
+				AVTransportServiceType,
+				"urn:schemas-upnp-org:device:MediaRenderer:1",
+				"upnp:rootdevice",
+				"ssdp:all",
+			} {
 				msg := msearchMessage(st)
 				_, _ = conn.WriteToUDP([]byte(msg), &net.UDPAddr{IP: net.ParseIP(ssdpIP), Port: ssdpPort})
 			}
