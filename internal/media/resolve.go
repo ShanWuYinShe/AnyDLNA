@@ -17,7 +17,27 @@ type Resolved struct {
 	IsLive      bool    `json:"isLive"`
 	Extractor   string  `json:"extractor"`
 	Uploader    string  `json:"uploader"`
+	// VideoCodec / AudioCodec 是所选格式的编码，用于判断能否免转码直通。
+	VideoCodec string `json:"videoCodec"`
+	AudioCodec string `json:"audioCodec"`
 }
+
+// formatSelector 是 yt-dlp 的格式选择表达式。
+//
+// 首选顺序刻意把 H.264（avc1）与 AAC（mp4a）排在前面：这两个编码电视可原生
+// 解码，从而让视频轨道能免转码直通（换封装）。yt-dlp 默认会挑 AV1/VP9 等
+// 更高压缩率的编码，那类源在电视端必须完整转码——实测 4K 转码仅约 1.4 倍
+// 实时，是播放卡顿的主因。
+//
+// 逐级回退，保证任何站点都能选出可用的格式：
+//  1. H.264 视频 + AAC 音频：视频音频都可直通（最优）。
+//  2. H.264 视频 + 任意音频：视频直通，音频按需转码。
+//  3. 任意视频 + AAC 音频。
+//  4. 任意视频 + 任意音频：不得已时的完整转码。
+const formatSelector = "bv*[vcodec^=avc1]+ba[acodec^=mp4a]/" +
+	"bv*[vcodec^=avc1]+ba/" +
+	"bv*+ba[acodec^=mp4a]/" +
+	"bv*+ba/b"
 
 // HasYtDlp 报告 yt-dlp 是否可用。
 func HasYtDlp() bool {
@@ -55,7 +75,7 @@ func Resolve(ctx context.Context, url string, opts Options) (*Resolved, error) {
 	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
-	args := append([]string{"-J", "--no-playlist", "--no-warnings"}, ytDlpCommonArgs(opts)...)
+	args := append([]string{"-J", "--no-playlist", "--no-warnings", "-f", formatSelector}, ytDlpCommonArgs(opts)...)
 	cmd := exec.CommandContext(ctx, "yt-dlp", append(args, url)...)
 	var stderr limitBuffer
 	cmd.Stderr = &stderr
@@ -73,6 +93,8 @@ func Resolve(ctx context.Context, url string, opts Options) (*Resolved, error) {
 		IsLive    bool    `json:"is_live"`
 		Extractor string  `json:"extractor_key"`
 		Uploader  string  `json:"uploader"`
+		VCodec    string  `json:"vcodec"`
+		ACodec    string  `json:"acodec"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil {
 		return nil, fmt.Errorf("解析 yt-dlp 输出失败: %w", err)
@@ -83,6 +105,8 @@ func Resolve(ctx context.Context, url string, opts Options) (*Resolved, error) {
 		IsLive:      raw.IsLive,
 		Extractor:   raw.Extractor,
 		Uploader:    raw.Uploader,
+		VideoCodec:  raw.VCodec,
+		AudioCodec:  raw.ACodec,
 	}, nil
 }
 
@@ -104,10 +128,11 @@ func ytDlpErrTail(stderr string) string {
 }
 
 // ytDlpStreamArgs 构造把在线视频（已合并音视频）写到 stdout 的 yt-dlp 参数。
+// 与 Resolve 使用同一 formatSelector，保证解析阶段报告编码与实际拉流一致；
 // startSec>0 且非直播时用 --download-sections 实现快进到指定位置；
 // opts 语义见 ytDlpCommonArgs。
 func ytDlpStreamArgs(url string, startSec float64, isLive bool, opts Options) []string {
-	args := append([]string{"-q", "--no-playlist", "--no-warnings"}, ytDlpCommonArgs(opts)...)
+	args := append([]string{"-q", "--no-playlist", "--no-warnings", "-f", formatSelector}, ytDlpCommonArgs(opts)...)
 	if startSec > 0 && !isLive {
 		args = append(args, "--download-sections", "*"+strconv.FormatFloat(startSec, 'f', 2, 64)+"-inf")
 	}

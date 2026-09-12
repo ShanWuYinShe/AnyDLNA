@@ -354,24 +354,41 @@ async function resolveURL() {
     }
 }
 
+// modeText 把输出方式转成面向用户的说明与样式。
+// remux（换封装）与 direct（原文件直出）都不重编码视频，因此是「无损」档。
+function modeText(mode, which) {
+    switch (mode) {
+        case 'direct':
+            return { text: '电视可直接解码，原文件直出（支持拖动进度）', cls: 'ok' };
+        case 'remux':
+            return { text: which === 'file'
+                ? '免转码：仅换封装为 MPEG-TS，画质无损'
+                : '免转码直通：视频无损，几乎不占 CPU', cls: 'ok' };
+        default:
+            return { text: which === 'file'
+                ? '该编码电视无法解码，需实时转码（H.264/AAC）'
+                : '该编码电视无法解码，需实时转码（较耗 CPU）', cls: 'tc' };
+    }
+}
+
 function renderPending() {
     const p = state.pending;
     if (!p) return;
     $('videoCard').classList.remove('hidden');
     $('videoHint').classList.add('hidden');
     $('vName').textContent = p.name || p.title || '未命名';
+    const m = modeText(p.mode, p.type);
     if (p.type === 'file') {
         const res = p.width ? `${p.width}×${p.height} · ` : '';
         $('vMeta').textContent = `本地文件 · ${res}${p.videoCodec || '?'} + ${p.audioCodec || '无声'} · ${fmtClock(p.durationSec)} · ${p.sizeMB.toFixed(0)} MB`;
-        $('vBadge').textContent = p.directPlay ? '电视可直接解码，原文件直出' : '本地文件需转码（H.264/AAC MPEG-TS 实时转码）';
-        $('vBadge').className = 'video-badge ' + (p.directPlay ? 'ok' : 'tc');
     } else {
         const from = p.extractor ? `来源 ${p.extractor}` : '在线视频';
         const dur = p.isLive ? '直播' : fmtClock(p.durationSec);
-        $('vMeta').textContent = `${from}${p.uploader ? ' · ' + p.uploader : ''} · ${dur}`;
-        $('vBadge').textContent = '在线视频经本机解析转码中转';
-        $('vBadge').className = 'video-badge tc';
+        const codecs = [p.videoCodec, p.audioCodec].filter(Boolean).join(' + ');
+        $('vMeta').textContent = `${from}${p.uploader ? ' · ' + p.uploader : ''} · ${dur}${codecs ? ' · ' + codecs : ''}`;
     }
+    $('vBadge').textContent = m.text;
+    $('vBadge').className = 'video-badge ' + m.cls;
 }
 
 // ---------- 投屏 ----------

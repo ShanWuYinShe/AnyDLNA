@@ -35,7 +35,8 @@ type PickedVideo struct {
 	Width       int     `json:"width"`
 	Height      int     `json:"height"`
 	SizeMB      float64 `json:"sizeMB"`
-	DirectPlay  bool    `json:"directPlay"`
+	// Mode 是预计的输出方式：direct / remux / transcode。
+	Mode string `json:"mode"`
 }
 
 // CastStatus 描述当前投屏状态。
@@ -43,7 +44,9 @@ type CastStatus struct {
 	Active bool   `json:"active"`
 	Device string `json:"device"`
 	File   string `json:"file"`
-	Mode   string `json:"mode"` // direct=原文件直出，transcode=本地文件转码，stream=在线视频中转
+	// Mode 取值：direct=原文件直出，remux=换封装（不重编码视频），
+	// transcode=完整转码，stream=在线视频中转。
+	Mode string `json:"mode"`
 }
 
 // ResolvedInfo 是在线视频 URL 的解析预览。
@@ -54,6 +57,10 @@ type ResolvedInfo struct {
 	IsLive      bool    `json:"isLive"`
 	Extractor   string  `json:"extractor"`
 	Uploader    string  `json:"uploader"`
+	VideoCodec  string  `json:"videoCodec"`
+	AudioCodec  string  `json:"audioCodec"`
+	// Mode 是预计的输出方式：remux（免转码）或 transcode。
+	Mode string `json:"mode"`
 }
 
 // Position 是电视端播放进度快照。
@@ -239,6 +246,7 @@ func (a *App) PickVideo() (*PickedVideo, error) {
 	if err != nil {
 		return nil, err
 	}
+	plan := media.PlanForLocal(info)
 	return &PickedVideo{
 		Path:        path,
 		Name:        info.Title,
@@ -248,7 +256,7 @@ func (a *App) PickVideo() (*PickedVideo, error) {
 		Width:       info.Width,
 		Height:      info.Height,
 		SizeMB:      float64(info.SizeBytes) / 1024 / 1024,
-		DirectPlay:  !info.NeedsTranscode(),
+		Mode:        string(plan.Mode),
 	}, nil
 }
 
@@ -262,12 +270,12 @@ func (a *App) Cast(udn, path string) (*CastStatus, error) {
 		return nil, err
 	}
 	if !media.HasFFmpeg() {
-		// 无 ffmpeg 时只能直出，不兼容的格式无法保证可播。
+		// 无 ffmpeg 时只能投递原文件字节：换封装与转码都需要 ffmpeg。
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		info, probeErr := media.Probe(ctx, path)
 		cancel()
-		if probeErr != nil || info.NeedsTranscode() {
-			return nil, errors.New("未安装 ffmpeg，无法转码该格式；请执行 brew install ffmpeg")
+		if probeErr != nil || !media.PlanForLocal(info).IsDirect() {
+			return nil, errors.New("未安装 ffmpeg，只能直接播放电视可解码的 MP4（H.264/AAC）；请执行 brew install ffmpeg")
 		}
 	}
 
@@ -278,22 +286,23 @@ func (a *App) Cast(udn, path string) (*CastStatus, error) {
 	if err != nil {
 		return nil, err
 	}
-	transcode := info.NeedsTranscode()
+	plan := media.PlanForLocal(info)
 
 	var sessionID, mime, mode string
-	if transcode {
-		sessionID = srv.AddTranscode(path, info.Title)
-		mime, mode = "video/mp2t", "transcode"
-	} else {
+	switch plan.Mode {
+	case media.OutputDirect:
 		sessionID = srv.AddDirect(path, media.MimeTypeFor(path), info.Title)
 		mime, mode = media.MimeTypeFor(path), "direct"
+	default:
+		sessionID = srv.AddTranscode(path, info.Title, plan)
+		mime, mode = "video/mp2t", string(plan.Mode)
 	}
 	ip, err := netutil.LANIP()
 	if err != nil {
 		srv.Remove(sessionID)
 		return nil, fmt.Errorf("获取本机局域网地址失败: %w", err)
 	}
-	playURL := srv.URL(ip, sessionID, !transcode)
+	playURL := srv.URL(ip, sessionID, plan.IsDirect())
 	return a.startCast(dev, srv, sessionID, info.Title, playURL, mime, mode, ctx)
 }
 
@@ -309,6 +318,7 @@ func (a *App) ResolveURL(rawURL string) (*ResolvedInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	plan := media.PlanForOnline(r.VideoCodec, r.AudioCodec)
 	return &ResolvedInfo{
 		URL:         rawURL,
 		Title:       r.Title,
@@ -316,6 +326,9 @@ func (a *App) ResolveURL(rawURL string) (*ResolvedInfo, error) {
 		IsLive:      r.IsLive,
 		Extractor:   r.Extractor,
 		Uploader:    r.Uploader,
+		VideoCodec:  r.VideoCodec,
+		AudioCodec:  r.AudioCodec,
+		Mode:        string(plan.Mode),
 	}, nil
 }
 
@@ -372,14 +385,15 @@ func (a *App) CastURL(udn, rawURL string) (*CastStatus, error) {
 	if err != nil {
 		return nil, err
 	}
-	sessionID := srv.AddTranscodeURL(rawURL, resolved.Title, resolved.IsLive, opts)
+	plan := media.PlanForOnline(resolved.VideoCodec, resolved.AudioCodec)
+	sessionID := srv.AddTranscodeURL(rawURL, resolved.Title, resolved.IsLive, opts, plan)
 	ip, err := netutil.LANIP()
 	if err != nil {
 		srv.Remove(sessionID)
 		return nil, fmt.Errorf("获取本机局域网地址失败: %w", err)
 	}
 	playURL := srv.URL(ip, sessionID, false)
-	return a.startCast(dev, srv, sessionID, resolved.Title, playURL, "video/mp2t", "stream", ctx)
+	return a.startCast(dev, srv, sessionID, resolved.Title, playURL, "video/mp2t", string(plan.Mode), ctx)
 }
 
 // findDeviceLocked 按 UDN 在最近一次搜索结果中查找设备；调用方须持有 a.mu。

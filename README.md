@@ -5,8 +5,9 @@
 ## 功能
 
 - **设备发现**：SSDP 组播搜索局域网内的 DLNA MediaRenderer（电视、盒子），自动解析设备描述。
-- **在线视频投屏**：粘贴视频页面/流地址，`yt-dlp` 解析并拉取音视频流，`ffmpeg` 实时转码为 MPEG-TS 中转给电视——电视端不需要支持该网站，也不受 DASH 分离流、Referer/IP 校验限制。支持 YouTube、Bilibili 等数千个站点与 m3u8/mp4 直链。
-- **本地视频**：`ffprobe` 探测编码；`H.264 + AAC` 的 MP4/MOV 原文件直出（带 Range，支持拖动进度）；其余格式（MKV、HEVC、AVI、FLV、RMVB……）自动实时转码。
+- **在线视频投屏**：粘贴视频页面/流地址，`yt-dlp` 解析并拉取音视频流，经本机中转给电视——电视端不需要支持该网站，也不受 DASH 分离流、Referer/IP 校验限制。支持 YouTube、Bilibili 等数千个站点与 m3u8/mp4 直链。
+- **优先免转码**：优先选择电视可原生解码的 H.264/AAC 源，仅做封装转换（remux）而不重编码，画质无损且几乎不占 CPU；源编码确实不被支持时才转码。详见「播放性能」。
+- **本地视频**：`ffprobe` 探测编码；`H.264 + AAC` 的 MP4/MOV 原文件直出（带 Range，支持拖动进度）；其他 H.264 内容换封装为 MPEG-TS；HEVC/AV1/10-bit 等电视无法解码的格式才实时转码。
 - **播放控制**：播放 / 暂停 / 停止、进度跳转（转码/在线模式跳转时转码进程从新位置重启）、音量调节（RenderingControl）。
 - **流服务**：应用内置 HTTP 服务监听局域网可达地址，电视端通过 `SetAVTransportURI` 拉取本机流。
 - **设置页**：代理（跟随系统 / 手动 / 直连）与站点登录状态（读取本机浏览器 / 应用登录浏览器 / 不使用）集中管理，见下文。
@@ -71,7 +72,22 @@ YouTube 等站点常要求人机验证（"Sign in to confirm you're not a bot"�
 - **「用应用登录浏览器」必须使用独立 profile（技术限制，非实现选择）**：Chrome 136 起，`--remote-debugging-port` 在默认数据目录下会被忽略，官方推荐自动化场景使用独立数据目录（见 [Chrome 官方说明](https://developer.chrome.com/blog/remote-debugging-port)）；此外同一 profile 不能被两个进程同时打开，共享 profile 将要求你先完全退出日常浏览器。因此这里刻意不共用日常 profile。
 - **复制日常 profile 的做法不可行**：Chrome 的 App-Bound Encryption 把 Cookie 密钥绑定在原 profile 上，复制到别处后登录态无法解密（实测复制后仅能读到匿名 Cookie）。这也是「读取本机浏览器」由 yt-dlp 原地读取、而非应用先复制的原因。
 
-> 注意：在线视频经本机实时转码，清晰度默认为 yt-dlp 所选最佳格式，转码码率上限 4 Mbps。
+## 播放性能
+
+播放流畅度取决于**是否重编码视频**——这是整条链路唯一的性能瓶颈。应用会自动在三种方式中选择最省的一种，界面上的提示会写明当前用的是哪种：
+
+| 方式 | 触发条件 | 实测速度 | 画质 |
+| --- | --- | --- | --- |
+| **原文件直出**（direct） | 本地 MP4/MOV，视频 H.264 + 音频 AAC | 无开销 | 无损，支持拖动进度 |
+| **换封装**（remux） | 视频 H.264（8-bit），音频任意 | 约 **18–29 倍**实时 | **无损** |
+| **实时转码**（transcode） | 视频为 HEVC/AV1/VP9/10-bit 等 | 1080p 约 2 倍、4K 约 1.4 倍 | 有损 |
+
+两个关键设计：
+
+- **优先挑选 H.264/AAC 源**。yt-dlp 默认会选 AV1/VP9 等压缩率更高的编码，但电视普遍无法解码，结果是每次都得完整转码。应用改用格式选择器优先取 `avc1` + `mp4a`，因此 B 站、YouTube 等站点通常都能走免转码路径（逐级回退，任何站点仍能选出可用格式）。
+- **10-bit H.264（Hi10P）仍会转码**。这类动漫常见格式虽名为 H.264，但绝大多数电视解不了，换封装会导致黑屏，因此应用会探测像素格式并强制转码。
+
+> 若播放仍不流畅，通常是网络带宽而非解码：4K 源本身码率可达 9 Mbps 以上，换封装虽不耗 CPU，但仍需把这些数据传到电视。这种情况可在设置页改用较低清晰度，或检查电视的 Wi-Fi 信号。
 
 ## 搜索不到设备？
 
@@ -88,7 +104,8 @@ YouTube 等站点常要求人机验证（"Sign in to confirm you're not a bot"�
 main.go                  # Wails 入口
 app.go                   # 绑定给前端的业务层（搜索/选择/解析/投屏/控制/轮询/设置）
 internal/dlna/           # SSDP 发现、设备描述解析、AVTransport/RenderingControl SOAP 控制
-internal/media/          # ffprobe 探测、yt-dlp 在线源解析、ffmpeg 实时转码、局域网 HTTP 流服务、
+internal/media/          # ffprobe 探测、输出方式决策（直出/换封装/转码）、yt-dlp 在线源解析、
+                         # ffmpeg 实时处理、局域网 HTTP 流服务、
                          # 配置持久化、代理探测（分平台）、Netscape Cookies 文件读写
 internal/browser/        # 纯 Go 的浏览器自动化（CDP）：启动独立 profile 的浏览器并读回 Cookies
 internal/netutil/        # 本机局域网地址探测

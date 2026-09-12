@@ -112,7 +112,7 @@ func TestStreamServerSetTranscodeOffset(t *testing.T) {
 	}
 
 	path := newTestFile(t, []byte("x"))
-	id := srv.AddTranscode(path, "sample")
+	id := srv.AddTranscode(path, "sample", Plan{Mode: OutputTranscode})
 	// RestartAt 只记录偏移并终止（未启动的）进程，不应报错。
 	srv.SetTranscodeOffset(id, 42.5)
 	// 此时无电视拉流，不应有 ffmpeg 残留进程。

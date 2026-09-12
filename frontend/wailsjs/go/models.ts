@@ -95,7 +95,7 @@ export namespace main {
 	    width: number;
 	    height: number;
 	    sizeMB: number;
-	    directPlay: boolean;
+	    mode: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new PickedVideo(source);
@@ -111,7 +111,7 @@ export namespace main {
 	        this.width = source["width"];
 	        this.height = source["height"];
 	        this.sizeMB = source["sizeMB"];
-	        this.directPlay = source["directPlay"];
+	        this.mode = source["mode"];
 	    }
 	}
 	export class Position {
@@ -137,6 +137,9 @@ export namespace main {
 	    isLive: boolean;
 	    extractor: string;
 	    uploader: string;
+	    videoCodec: string;
+	    audioCodec: string;
+	    mode: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new ResolvedInfo(source);
@@ -150,6 +153,9 @@ export namespace main {
 	        this.isLive = source["isLive"];
 	        this.extractor = source["extractor"];
 	        this.uploader = source["uploader"];
+	        this.videoCodec = source["videoCodec"];
+	        this.audioCodec = source["audioCodec"];
+	        this.mode = source["mode"];
 	    }
 	}
 

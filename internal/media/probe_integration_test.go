@@ -3,6 +3,7 @@ package media
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -28,7 +29,12 @@ func TestProbeIntegration(t *testing.T) {
 		t.Error("未解析出标题")
 	}
 	// 判定结果与编码一致：h264+aac+mp4 应直出。
-	if got := info.NeedsTranscode(); got != (info.VideoCodec != "h264" || info.AudioCodec != "aac") {
-		t.Errorf("NeedsTranscode=%v 与编码 %s/%s 不一致", got, info.VideoCodec, info.AudioCodec)
+	plan := PlanForLocal(info)
+	if !strings.EqualFold(info.VideoCodec, "h264") && plan.NeedsVideoEncode() == false {
+		t.Errorf("非 H.264 源（%s）必须重编码视频，实际 plan=%+v", info.VideoCodec, plan)
 	}
+	if strings.EqualFold(info.VideoCodec, "h264") && plan.NeedsVideoEncode() {
+		t.Errorf("H.264 源（%s）不应重编码视频，实际 plan=%+v", info.VideoCodec, plan)
+	}
+	t.Logf("本地文件输出方式: %+v", plan)
 }

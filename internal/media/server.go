@@ -79,15 +79,15 @@ func (s *StreamServer) AddDirect(path, mime, title string) string {
 	return s.add(&session{id: newSessionID(), path: path, direct: true, mime: mime, title: title})
 }
 
-// AddTranscode 注册本地文件转码会话，返回会话 ID。
-func (s *StreamServer) AddTranscode(path, title string) string {
-	return s.add(&session{id: newSessionID(), path: path, direct: false, mime: mpegtsMIME, title: title, tc: NewTranscoder(path)})
+// AddTranscode 注册本地文件流会话（按 plan 换封装或转码），返回会话 ID。
+func (s *StreamServer) AddTranscode(path, title string, plan Plan) string {
+	return s.add(&session{id: newSessionID(), path: path, direct: false, mime: mpegtsMIME, title: title, tc: NewTranscoder(path, plan)})
 }
 
-// AddTranscodeURL 注册在线视频转码会话：yt-dlp 解析拉流，ffmpeg 转码为 MPEG-TS。
+// AddTranscodeURL 注册在线视频流会话：yt-dlp 解析拉流，ffmpeg 按 plan 换封装或转码为 MPEG-TS。
 // opts 决定 yt-dlp 的代理与 Cookies 行为，语义见 ytDlpCommonArgs。
-func (s *StreamServer) AddTranscodeURL(url, title string, isLive bool, opts Options) string {
-	return s.add(&session{id: newSessionID(), direct: false, mime: mpegtsMIME, title: title, tc: NewURLTranscoder(url, isLive, opts)})
+func (s *StreamServer) AddTranscodeURL(url, title string, isLive bool, opts Options, plan Plan) string {
+	return s.add(&session{id: newSessionID(), direct: false, mime: mpegtsMIME, title: title, tc: NewURLTranscoder(url, isLive, opts, plan)})
 }
 
 func (s *StreamServer) add(sess *session) string {
