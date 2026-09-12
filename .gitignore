@@ -1,5 +1,7 @@
 # Wails bin directory
 build/bin
+# 前端构建产物（由 wails build 生成并被 embed 进二进制）
+frontend/dist
 # Wails Windows NSIS support files
 build/windows/installer/wails_tools.nsh
 build/windows/installer/tmp/
@@ -7,6 +9,8 @@ build/windows/installer/tmp/
 # AI 工作中间产物
 .workwork/
 .v2c/
+# 并行开发用的 git worktree 目录
+.worktrees/
 
 # IDEs
 .idea
@@ -14,3 +18,6 @@ build/windows/installer/tmp/
 
 # The black hole is...
 node_modules
+
+# macOS
+.DS_Store
