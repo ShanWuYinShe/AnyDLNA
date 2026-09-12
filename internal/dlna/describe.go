@@ -80,7 +80,7 @@ func collectDevice(node *descDevice, base *url.URL, dev *Device) {
 		dev.ModelName = strings.TrimSpace(node.ModelName)
 	}
 	for _, svc := range node.Services {
-		if svc.Type != AVTransportServiceType && svc.Type != RenderingControlServiceType {
+		if !isKnownServiceType(svc.Type) {
 			continue
 		}
 		if dev.Service(svc.Type) != nil {
@@ -96,6 +96,16 @@ func collectDevice(node *descDevice, base *url.URL, dev *Device) {
 	for i := range node.Children {
 		collectDevice(&node.Children[i], base, dev)
 	}
+}
+
+// isKnownServiceType 报告服务类型是否为本应用需要的服务。
+func isKnownServiceType(serviceType string) bool {
+	for _, known := range knownServiceTypes {
+		if serviceType == known {
+			return true
+		}
+	}
+	return false
 }
 
 // DescribeByHost 在 SSDP 失效时手动发现设备：并发尝试常见 UPnP 描述地址，

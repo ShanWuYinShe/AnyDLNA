@@ -29,7 +29,7 @@ func TestProbeIntegration(t *testing.T) {
 		t.Error("未解析出标题")
 	}
 	// 判定结果与编码一致：h264+aac+mp4 应直出。
-	plan := PlanForLocal(info)
+	plan := PlanForLocal(info, DeviceCapabilities{})
 	if !strings.EqualFold(info.VideoCodec, "h264") && plan.NeedsVideoEncode() == false {
 		t.Errorf("非 H.264 源（%s）必须重编码视频，实际 plan=%+v", info.VideoCodec, plan)
 	}

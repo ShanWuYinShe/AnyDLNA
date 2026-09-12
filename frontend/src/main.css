@@ -60,6 +60,13 @@ body {
 
 .hint { color: var(--text-dim); font-size: 13px; line-height: 1.7; padding: 8px 2px; }
 
+/* 设备能力协商结果：选中设备后展示其声明的格式 */
+.caps-line {
+    font-size: 12px; line-height: 1.7; color: var(--text-dim);
+    background: var(--panel-2); border-radius: 8px; padding: 8px 10px;
+}
+.caps-line b { color: var(--ok); font-weight: 600; }
+
 /* 设备列表 */
 .device-list { list-style: none; display: flex; flex-direction: column; gap: 8px; overflow: auto; }
 .device {

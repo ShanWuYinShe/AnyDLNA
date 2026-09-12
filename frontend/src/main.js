@@ -73,8 +73,45 @@ function addDeviceItem(d) {
         list.querySelectorAll('.device').forEach((x) => x.classList.remove('selected'));
         li.classList.add('selected');
         state.selectedUDN = d.udn;
+        showDeviceCapabilities(d);
     };
     list.appendChild(li);
+}
+
+// showDeviceCapabilities 展示选中设备声明的接收能力。
+// 这直接决定投屏时能否免转码，因此让用户能看到依据。
+async function showDeviceCapabilities(d) {
+    const el = $('deviceCaps');
+    el.classList.remove('hidden');
+    el.textContent = `正在查询「${d.name}」支持的格式…`;
+    let caps;
+    try {
+        caps = await window.go.main.App.DeviceCapabilityInfo(d.udn);
+    } catch {
+        el.textContent = '查询设备格式失败，将按通用策略处理。';
+        return;
+    }
+    if (!caps || !caps.queried) {
+        el.textContent = '该设备未上报支持的格式，将按通用策略处理（H.264 免转码）。';
+        return;
+    }
+    const ok = [];
+    if (caps.supportsMp4) ok.push('MP4');
+    if (caps.supportsMkv) ok.push('MKV');
+    if (caps.supportsTs) ok.push('MPEG-TS');
+    const total = (caps.videoMIMEs || []).length;
+    el.innerHTML = '';
+    const lead = document.createElement('div');
+    lead.textContent = `设备声明支持 ${total} 种视频格式`;
+    el.appendChild(lead);
+    const detail = document.createElement('div');
+    if (ok.length) {
+        detail.innerHTML = '可用于免转码直出：<b></b>';
+        detail.querySelector('b').textContent = ok.join(' / ');
+    } else {
+        detail.textContent = '未声明可直出的常见容器，将以换封装或转码方式投屏。';
+    }
+    el.appendChild(detail);
 }
 
 async function addDeviceManually() {
@@ -332,7 +369,8 @@ async function clearCookies() {
 // ---------- 视频来源（本地文件 / 在线链接）----------
 
 async function pickVideo() {
-    const v = await call('PickVideo');
+    // 传入当前选中设备：后端据此查询该设备声明的格式，给出真实方案。
+    const v = await call('PickVideo', state.selectedUDN || '');
     if (!v) return; // 用户取消
     state.pending = { type: 'file', ...v };
     renderPending();
@@ -344,7 +382,7 @@ async function resolveURL() {
     $('btnResolve').disabled = true;
     $('btnResolve').textContent = '解析中…';
     try {
-        const r = await call('ResolveURL', url);
+        const r = await call('ResolveURL', state.selectedUDN || '', url);
         state.pending = { type: 'url', ...r };
         renderPending();
     } catch { /* toast 已提示 */ }
@@ -355,19 +393,22 @@ async function resolveURL() {
 }
 
 // modeText 把输出方式转成面向用户的说明与样式。
-// remux（换封装）与 direct（原文件直出）都不重编码视频，因此是「无损」档。
-function modeText(mode, which) {
-    switch (mode) {
+// direct（原文件直出）与 remux（换封装）都不重编码视频，属于「无损」档。
+function modeText(p) {
+    switch (p.mode) {
         case 'direct':
-            return { text: '电视可直接解码，原文件直出（支持拖动进度）', cls: 'ok' };
+            return { text: '免转码：设备已声明支持该格式，原文件直出（可拖动进度）', cls: 'ok' };
         case 'remux':
-            return { text: which === 'file'
-                ? '免转码：仅换封装为 MPEG-TS，画质无损'
-                : '免转码直通：视频无损，几乎不占 CPU', cls: 'ok' };
+            // 非 faststart 的 MP4 需要先换封装才能立即起播，单独说明原因。
+            if (p.type === 'file' && p.fastStart === false) {
+                return {
+                    text: '免转码：该 MP4 索引在文件末尾，换封装后即可立即起播（画质无损）',
+                    cls: 'ok',
+                };
+            }
+            return { text: '免转码：仅换封装，画质无损、几乎不占 CPU', cls: 'ok' };
         default:
-            return { text: which === 'file'
-                ? '该编码电视无法解码，需实时转码（H.264/AAC）'
-                : '该编码电视无法解码，需实时转码（较耗 CPU）', cls: 'tc' };
+            return { text: '设备无法解码该编码，需实时转码（较耗 CPU）', cls: 'tc' };
     }
 }
 
@@ -377,7 +418,7 @@ function renderPending() {
     $('videoCard').classList.remove('hidden');
     $('videoHint').classList.add('hidden');
     $('vName').textContent = p.name || p.title || '未命名';
-    const m = modeText(p.mode, p.type);
+    const m = modeText(p);
     if (p.type === 'file') {
         const res = p.width ? `${p.width}×${p.height} · ` : '';
         $('vMeta').textContent = `本地文件 · ${res}${p.videoCodec || '?'} + ${p.audioCodec || '无声'} · ${fmtClock(p.durationSec)} · ${p.sizeMB.toFixed(0)} MB`;

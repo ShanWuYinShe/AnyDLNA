@@ -81,13 +81,19 @@ func (s *StreamServer) AddDirect(path, mime, title string) string {
 
 // AddTranscode 注册本地文件流会话（按 plan 换封装或转码），返回会话 ID。
 func (s *StreamServer) AddTranscode(path, title string, plan Plan) string {
-	return s.add(&session{id: newSessionID(), path: path, direct: false, mime: mpegtsMIME, title: title, tc: NewTranscoder(path, plan)})
+	return s.add(&session{
+		id: newSessionID(), path: path, direct: false,
+		mime: plan.OutputMIME(), title: title, tc: NewTranscoder(path, plan),
+	})
 }
 
-// AddTranscodeURL 注册在线视频流会话：yt-dlp 解析拉流，ffmpeg 按 plan 换封装或转码为 MPEG-TS。
+// AddTranscodeURL 注册在线视频流会话：yt-dlp 解析拉流，ffmpeg 按 plan 换封装或转码。
 // opts 决定 yt-dlp 的代理与 Cookies 行为，语义见 ytDlpCommonArgs。
 func (s *StreamServer) AddTranscodeURL(url, title string, isLive bool, opts Options, plan Plan) string {
-	return s.add(&session{id: newSessionID(), direct: false, mime: mpegtsMIME, title: title, tc: NewURLTranscoder(url, isLive, opts, plan)})
+	return s.add(&session{
+		id: newSessionID(), direct: false,
+		mime: plan.OutputMIME(), title: title, tc: NewURLTranscoder(url, isLive, opts, plan),
+	})
 }
 
 func (s *StreamServer) add(sess *session) string {
@@ -151,7 +157,8 @@ func (s *StreamServer) serveTranscode(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Content-Type", mpegtsMIME)
+	// 使用会话注册时的容器类型：可能是 MPEG-TS，也可能是碎片化 MP4。
+	w.Header().Set("Content-Type", sess.mime)
 	w.Header().Set("Connection", "close")
 	w.WriteHeader(http.StatusOK)
 	// 主动 flush，让电视端尽快收到数据开始起播。

@@ -56,7 +56,7 @@ func TestURLStreamIntegration(t *testing.T) {
 	}
 	defer ss.Close()
 	id := ss.AddTranscodeURL(base+"/sample.mp4", res.Title, res.IsLive,
-		Options{ProxyMode: ProxyModeNone}, PlanForOnline(res.VideoCodec, res.AudioCodec))
+		Options{ProxyMode: ProxyModeNone}, PlanForOnline(res.VideoCodec, res.AudioCodec, DeviceCapabilities{}))
 
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/t/%s", ss.Port(), id))
 	if err != nil {

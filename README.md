@@ -6,8 +6,8 @@
 
 - **设备发现**：SSDP 组播搜索局域网内的 DLNA MediaRenderer（电视、盒子），自动解析设备描述。
 - **在线视频投屏**：粘贴视频页面/流地址，`yt-dlp` 解析并拉取音视频流，经本机中转给电视——电视端不需要支持该网站，也不受 DASH 分离流、Referer/IP 校验限制。支持 YouTube、Bilibili 等数千个站点与 m3u8/mp4 直链。
-- **优先免转码**：优先选择电视可原生解码的 H.264/AAC 源，仅做封装转换（remux）而不重编码，画质无损且几乎不占 CPU；源编码确实不被支持时才转码。详见「播放性能」。
-- **本地视频**：`ffprobe` 探测编码；`H.264 + AAC` 的 MP4/MOV 原文件直出（带 Range，支持拖动进度）；其他 H.264 内容换封装为 MPEG-TS；HEVC/AV1/10-bit 等电视无法解码的格式才实时转码。
+- **优先免转码**：投屏前先查询设备声明支持的格式，能直出就直出、能换封装就不转码，画质无损且几乎不占 CPU；源编码确实不被支持时才转码。详见「播放性能」。
+- **本地视频**：`ffprobe` 探测编码；设备声明支持该格式且索引前置的 MP4 原文件直出（带 Range，支持拖动进度）；其他 H.264 内容换封装；HEVC/AV1/10-bit 等设备无法解码的格式才实时转码。
 - **播放控制**：播放 / 暂停 / 停止、进度跳转（转码/在线模式跳转时转码进程从新位置重启）、音量调节（RenderingControl）。
 - **流服务**：应用内置 HTTP 服务监听局域网可达地址，电视端通过 `SetAVTransportURI` 拉取本机流。
 - **设置页**：代理（跟随系统 / 手动 / 直连）与站点登录状态（读取本机浏览器 / 应用登录浏览器 / 不使用）集中管理，见下文。
@@ -74,20 +74,38 @@ YouTube 等站点常要求人机验证（"Sign in to confirm you're not a bot"�
 
 ## 播放性能
 
-播放流畅度取决于**是否重编码视频**——这是整条链路唯一的性能瓶颈。应用会自动在三种方式中选择最省的一种，界面上的提示会写明当前用的是哪种：
+播放流畅度取决于**是否重编码视频**——这是整条链路唯一的性能瓶颈。应用会先询问设备支持什么，再在三种方式中选择最省的一种，界面上的提示会写明当前用的是哪种：
 
 | 方式 | 触发条件 | 实测速度 | 画质 |
 | --- | --- | --- | --- |
-| **原文件直出**（direct） | 本地 MP4/MOV，视频 H.264 + 音频 AAC | 无开销 | 无损，支持拖动进度 |
+| **原文件直出**（direct） | 设备声明支持源文件格式，视频 H.264 + 音频 AAC（MP4 还须 faststart） | 无开销 | 无损，支持拖动进度 |
 | **换封装**（remux） | 视频 H.264（8-bit），音频任意 | 约 **18–29 倍**实时 | **无损** |
 | **实时转码**（transcode） | 视频为 HEVC/AV1/VP9/10-bit 等 | 1080p 约 2 倍、4K 约 1.4 倍 | 有损 |
 
-两个关键设计：
+### 与设备协商格式
 
-- **优先挑选 H.264/AAC 源**。yt-dlp 默认会选 AV1/VP9 等压缩率更高的编码，但电视普遍无法解码，结果是每次都得完整转码。应用改用格式选择器优先取 `avc1` + `mp4a`，因此 B 站、YouTube 等站点通常都能走免转码路径（逐级回退，任何站点仍能选出可用格式）。
-- **10-bit H.264（Hi10P）仍会转码**。这类动漫常见格式虽名为 H.264，但绝大多数电视解不了，换封装会导致黑屏，因此应用会探测像素格式并强制转码。
+DLNA 设备可通过标准的 `ConnectionManager` 服务声明自己能播放哪些格式。应用在投屏前会调用它的 `GetProtocolInfo` 取得 Sink 列表，据此决定：
 
-> 若播放仍不流畅，通常是网络带宽而非解码：4K 源本身码率可达 9 Mbps 以上，换封装虽不耗 CPU，但仍需把这些数据传到电视。这种情况可在设置页改用较低清晰度，或检查电视的 Wi-Fi 信号。
+- 设备**声明支持**源文件格式 → 直接投原文件（零处理，且支持拖动进度）；
+- 设备只支持 **MP4** 而不支持 MPEG-TS → 换封装为碎片化 MP4 而非 TS；
+- 设备**未提供**该服务或查询失败 → 回退到通用策略（H.264 换封装为 MPEG-TS），投屏不受影响。
+
+选中设备后，其声明支持的格式会显示在设备面板下方，便于确认协商依据。
+
+需要注意该列表的**可信度差异**：
+
+- 规范实现会带上 `DLNA.ORG_PN` profile（如 `AVC_MP4_MP_HD_1080i_AAC`）与 `DLNA.ORG_OP` 参数，信息具体；
+- 部分设备只给 MIME 通配（如 `http-get:*:video/mp4:*`），甚至同时声称支持 RMVB/DivX 等一长串格式。
+
+这类列表只能作为**容器级**依据——它不包含编码信息。所以应用仍会检查视频编码：设备声称支持 MKV，不代表它能解 MKV 里的 HEVC。实际决策是「设备声明的容器能力」与「源文件真实编码」的结合：容器这层听设备的，编码这层仍按 H.264 / 8-bit 这一通用基线判断。
+
+### 另外三个关键设计
+
+- **优先挑选 H.264/AAC 源**。yt-dlp 默认会选 AV1/VP9 等压缩率更高的编码，但设备普遍无法解码，结果是每次都得完整转码。应用改用格式选择器优先取 `avc1` + `mp4a`，因此 B 站、YouTube 等站点通常都能走免转码路径（逐级回退，任何站点仍能选出可用格式）。
+- **MP4 需要索引前置（faststart）才能边下边播**。若索引在文件末尾，播放器必须下载完整个文件才起播——实测这类文件投出去后设备长时间黑屏不出画面。应用会检查索引位置，未前置时改用换封装以立即起播。这不是设备协商能覆盖的问题：容器与编码都兼容，仅索引顺序不同。
+- **10-bit H.264（Hi10P）仍会转码**。这类动漫常见格式虽名为 H.264，但绝大多数设备解不了，直通会导致黑屏，因此应用会探测像素格式并强制转码。
+
+> 若播放仍不流畅，通常是网络带宽而非解码：4K 源本身码率可达 9 Mbps 以上，免转码虽不耗 CPU，但仍需把这些数据传到设备。这种情况可在设置页改用较低清晰度，或检查设备的 Wi-Fi 信号。
 
 ## 搜索不到设备？
 
@@ -103,9 +121,10 @@ YouTube 等站点常要求人机验证（"Sign in to confirm you're not a bot"�
 ```
 main.go                  # Wails 入口
 app.go                   # 绑定给前端的业务层（搜索/选择/解析/投屏/控制/轮询/设置）
-internal/dlna/           # SSDP 发现、设备描述解析、AVTransport/RenderingControl SOAP 控制
-internal/media/          # ffprobe 探测、输出方式决策（直出/换封装/转码）、yt-dlp 在线源解析、
-                         # ffmpeg 实时处理、局域网 HTTP 流服务、
+internal/dlna/           # SSDP 发现、设备描述解析、AVTransport/RenderingControl SOAP 控制、
+                         # ConnectionManager 格式协商（GetProtocolInfo 解析与 MIME 归一化）
+internal/media/          # ffprobe 探测（含 MP4 faststart 检测）、输出方式决策（直出/换封装/转码）、
+                         # yt-dlp 在线源解析、ffmpeg 实时处理、局域网 HTTP 流服务、
                          # 配置持久化、代理探测（分平台）、Netscape Cookies 文件读写
 internal/browser/        # 纯 Go 的浏览器自动化（CDP）：启动独立 profile 的浏览器并读回 Cookies
 internal/netutil/        # 本机局域网地址探测
@@ -117,9 +136,11 @@ frontend/src/            # 原生 HTML/JS/CSS 界面（投屏主页 + 设置页�
 `app.go` 中的两把锁职责严格区分，修改时务必遵守：
 
 - `a.mu` 只保护内存状态，**临界区内绝不做网络、进程或等待用户的操作**；
-- `app.castMu` 串行化投屏相关操作，耗时的 I/O（yt-dlp 解析、设备 SOAP 调用、转码进程回收）在持有 `castMu`、但不持有 `a.mu` 的情况下执行。
+- `app.castMu` 串行化投屏相关操作，耗时的 I/O（设备能力查询、yt-dlp 解析、设备 SOAP 调用、转码进程回收）在持有 `castMu`、但不持有 `a.mu` 的情况下执行。
 
 违反该约定会导致 `a.mu` 被长时间占用，进而让**所有前端 IPC 挂起**（表现为「点了投屏没反应」），`app_test.go` 中的回归测试会捕获这类问题。
+
+诊断日志请用 `a.logf`（标准库）而非 `runtime.Log*`：Wails 的 runtime 日志在上下文不是生命周期上下文时会 `log.Fatalf` 直接终止进程，诊断信息不该有这种后果。
 
 ## 测试
 
@@ -133,4 +154,7 @@ ANYDLNA_PROBE_SAMPLE=/path/to/video.mp4 go test ./internal/media/ -run TestProbe
 ANYDLNA_STREAM_ITEST=1 ANYDLNA_STREAM_SAMPLE_DIR=/目录 go test ./internal/media/ -run TestURLStreamIntegration -v
 # 浏览器 Cookie 集成测试（会真实启动一个浏览器进程，使用临时 profile）：
 ANYDLNA_BROWSER_ITEST=1 go test ./internal/browser/ -run TestManagerCookiesIntegration -v
+# 设备格式协商集成测试（需局域网内有可访问的 DLNA 设备）：
+ANYDLNA_TV_HOST=192.168.1.100 go test ./internal/dlna/ -run TestRealDeviceProtocolInfoIntegration -v
+ANYDLNA_TV_HOST=192.168.1.100 go test . -run TestNegotiationEndToEnd -v
 ```

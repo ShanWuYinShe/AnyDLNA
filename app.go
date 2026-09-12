@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"strings"
 	"sync"
@@ -16,6 +17,15 @@ import (
 	"AnyDLNA/internal/media"
 	"AnyDLNA/internal/netutil"
 )
+
+// logf 输出应用诊断日志。
+//
+// 刻意使用标准库而非 Wails runtime：runtime.Log* 在传入的上下文不是
+// Wails 生命周期上下文时会直接 log.Fatalf 终止进程。诊断信息不该有这种
+// 后果——例如在测试或任何非 Wails 环境下调用时，应用不应因此退出。
+// 生命周期钩子（startup/shutdown）里拿到的 ctx 是真实上下文，
+// 那两处仍用 runtime 日志以便进入 Wails 的应用日志。
+func (a *App) logf(format string, args ...any) { log.Printf(format, args...) }
 
 // DeviceInfo 是展示给前端的设备条目。
 type DeviceInfo struct {
@@ -37,6 +47,9 @@ type PickedVideo struct {
 	SizeMB      float64 `json:"sizeMB"`
 	// Mode 是预计的输出方式：direct / remux / transcode。
 	Mode string `json:"mode"`
+	// FastStart 表示 MP4 的索引是否在文件开头；false 时无法边下边播，
+	// 会改用换封装以立即起播。
+	FastStart bool `json:"fastStart"`
 }
 
 // CastStatus 描述当前投屏状态。
@@ -194,6 +207,44 @@ func (a *App) SearchDevices(timeoutMS int) ([]DeviceInfo, error) {
 	return out, nil
 }
 
+// DeviceFormats 描述一台设备声明支持的格式，供设置界面展示。
+type DeviceFormats struct {
+	// Queried 表示是否成功查询到设备能力（设备需提供 ConnectionManager）。
+	Queried bool `json:"queried"`
+	// SupportsTS / SupportsMP4 / SupportsMKV 是决策时实际关心的三项能力。
+	SupportsTS  bool `json:"supportsTs"`
+	SupportsMP4 bool `json:"supportsMp4"`
+	SupportsMKV bool `json:"supportsMkv"`
+	// VideoMIMEs 是设备声明的全部视频格式（去重、排序）。
+	VideoMIMEs []string `json:"videoMIMEs"`
+}
+
+// DeviceCapabilityInfo 查询并返回指定设备声明的接收能力。
+// 用于界面上展示「将按设备实际支持情况决定是否免转码」。
+func (a *App) DeviceCapabilityInfo(udn string) *DeviceFormats {
+	a.mu.Lock()
+	dev := a.findDeviceLocked(udn)
+	a.mu.Unlock()
+
+	out := &DeviceFormats{}
+	if dev == nil || !dev.HasConnectionManager() {
+		return out
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	caps, err := dlna.NewRenderer(dev).QueryProtocolInfo(ctx)
+	if err != nil || !caps.Queried {
+		return out
+	}
+	out.Queried = true
+	out.VideoMIMEs = caps.VideoMIMEs()
+	out.SupportsTS = caps.SupportsMIME(media.ContainerMPEGTS.MIME())
+	out.SupportsMP4 = caps.SupportsMIME(media.ContainerFMP4.MIME())
+	out.SupportsMKV = caps.SupportsMIME("video/x-matroska")
+	return out
+}
+
 // AddDeviceManually 在 SSDP 发现失效时按 IP:端口 手动添加渲染设备。
 // 不带端口时自动尝试常见 UPnP 描述端口。添加后与搜索结果同等可投屏。
 func (a *App) AddDeviceManually(host string) (*DeviceInfo, error) {
@@ -226,7 +277,8 @@ func (a *App) hasDeviceLocked(udn string) bool {
 }
 
 // PickVideo 弹出文件选择框并探测所选视频。
-func (a *App) PickVideo() (*PickedVideo, error) {
+// udn 为当前选中的设备；用于按其声明的能力给出真实的输出方案（可为空）。
+func (a *App) PickVideo(udn string) (*PickedVideo, error) {
 	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
 		Title: "选择要投屏的视频",
 		Filters: []runtime.FileFilter{
@@ -246,7 +298,7 @@ func (a *App) PickVideo() (*PickedVideo, error) {
 	if err != nil {
 		return nil, err
 	}
-	plan := media.PlanForLocal(info)
+	plan := media.PlanForLocal(info, a.capabilitiesFor(udn))
 	return &PickedVideo{
 		Path:        path,
 		Name:        info.Title,
@@ -257,7 +309,40 @@ func (a *App) PickVideo() (*PickedVideo, error) {
 		Height:      info.Height,
 		SizeMB:      float64(info.SizeBytes) / 1024 / 1024,
 		Mode:        string(plan.Mode),
+		// FastStart 为 false 时说明该 MP4 索引在末尾，无法边下边播。
+		FastStart: info.FastStart,
 	}, nil
+}
+
+// capabilitiesFor 按 UDN 查找设备并查询其声明的接收能力。
+// 设备不存在、未提供 ConnectionManager 或查询失败时返回零值（保守回退）。
+func (a *App) capabilitiesFor(udn string) media.DeviceCapabilities {
+	a.mu.Lock()
+	dev := a.findDeviceLocked(udn)
+	a.mu.Unlock()
+	return a.deviceCapabilities(dev)
+}
+
+// deviceCapabilities 查询设备通过 ConnectionManager 声明的接收能力。
+// 查询失败不影响投屏，只是回退到通用策略。
+func (a *App) deviceCapabilities(dev *dlna.Device) media.DeviceCapabilities {
+	if dev == nil || !dev.HasConnectionManager() {
+		return media.DeviceCapabilities{}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	caps, err := dlna.NewRenderer(dev).QueryProtocolInfo(ctx)
+	if err != nil {
+		a.logf("查询设备 %s 的格式能力失败，回退到通用策略: %v", dev.FriendlyName, err)
+		return media.DeviceCapabilities{}
+	}
+	if !caps.Queried {
+		return media.DeviceCapabilities{}
+	}
+	mimes := caps.VideoMIMEs()
+	a.logf("设备 %s 声明支持 %d 种视频格式", dev.FriendlyName, len(mimes))
+	return media.DeviceCapabilities{Queried: true, MIMEs: mimes}
 }
 
 // Cast 把本地视频投到指定设备：注册流会话并通过 AVTransport 下发播放。
@@ -269,13 +354,16 @@ func (a *App) Cast(udn, path string) (*CastStatus, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 先问设备支持什么，再决定怎么投——这一步决定能否免转码。
+	caps := a.deviceCapabilities(dev)
+
 	if !media.HasFFmpeg() {
 		// 无 ffmpeg 时只能投递原文件字节：换封装与转码都需要 ffmpeg。
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		info, probeErr := media.Probe(ctx, path)
 		cancel()
-		if probeErr != nil || !media.PlanForLocal(info).IsDirect() {
-			return nil, errors.New("未安装 ffmpeg，只能直接播放电视可解码的 MP4（H.264/AAC）；请执行 brew install ffmpeg")
+		if probeErr != nil || !media.PlanForLocal(info, caps).IsDirect() {
+			return nil, errors.New("未安装 ffmpeg，只能直接播放设备可解码的原文件；请执行 brew install ffmpeg")
 		}
 	}
 
@@ -286,16 +374,16 @@ func (a *App) Cast(udn, path string) (*CastStatus, error) {
 	if err != nil {
 		return nil, err
 	}
-	plan := media.PlanForLocal(info)
+	plan := media.PlanForLocal(info, caps)
 
 	var sessionID, mime, mode string
 	switch plan.Mode {
 	case media.OutputDirect:
-		sessionID = srv.AddDirect(path, media.MimeTypeFor(path), info.Title)
-		mime, mode = media.MimeTypeFor(path), "direct"
+		sessionID = srv.AddDirect(path, plan.OutputMIME(), info.Title)
+		mime, mode = plan.OutputMIME(), string(plan.Mode)
 	default:
 		sessionID = srv.AddTranscode(path, info.Title, plan)
-		mime, mode = "video/mp2t", string(plan.Mode)
+		mime, mode = plan.OutputMIME(), string(plan.Mode)
 	}
 	ip, err := netutil.LANIP()
 	if err != nil {
@@ -307,7 +395,8 @@ func (a *App) Cast(udn, path string) (*CastStatus, error) {
 }
 
 // ResolveURL 解析在线视频页面地址，返回标题、时长等预览信息。
-func (a *App) ResolveURL(rawURL string) (*ResolvedInfo, error) {
+// udn 为当前选中的设备，用于按其声明的能力给出真实方案（可为空）。
+func (a *App) ResolveURL(udn, rawURL string) (*ResolvedInfo, error) {
 	if !media.HasYtDlp() {
 		return nil, errors.New("未安装 yt-dlp，无法解析在线视频；请执行 brew install yt-dlp")
 	}
@@ -318,7 +407,7 @@ func (a *App) ResolveURL(rawURL string) (*ResolvedInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	plan := media.PlanForOnline(r.VideoCodec, r.AudioCodec)
+	plan := media.PlanForOnline(r.VideoCodec, r.AudioCodec, a.capabilitiesFor(udn))
 	return &ResolvedInfo{
 		URL:         rawURL,
 		Title:       r.Title,
@@ -376,6 +465,7 @@ func (a *App) CastURL(udn, rawURL string) (*CastStatus, error) {
 		return nil, errors.New("未安装 ffmpeg，无法转码在线视频；请执行 brew install ffmpeg")
 	}
 
+	caps := a.deviceCapabilities(dev)
 	opts := a.resolveOptions()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -385,7 +475,7 @@ func (a *App) CastURL(udn, rawURL string) (*CastStatus, error) {
 	if err != nil {
 		return nil, err
 	}
-	plan := media.PlanForOnline(resolved.VideoCodec, resolved.AudioCodec)
+	plan := media.PlanForOnline(resolved.VideoCodec, resolved.AudioCodec, caps)
 	sessionID := srv.AddTranscodeURL(rawURL, resolved.Title, resolved.IsLive, opts, plan)
 	ip, err := netutil.LANIP()
 	if err != nil {
@@ -393,7 +483,7 @@ func (a *App) CastURL(udn, rawURL string) (*CastStatus, error) {
 		return nil, fmt.Errorf("获取本机局域网地址失败: %w", err)
 	}
 	playURL := srv.URL(ip, sessionID, false)
-	return a.startCast(dev, srv, sessionID, resolved.Title, playURL, "video/mp2t", string(plan.Mode), ctx)
+	return a.startCast(dev, srv, sessionID, resolved.Title, playURL, plan.OutputMIME(), string(plan.Mode), ctx)
 }
 
 // findDeviceLocked 按 UDN 在最近一次搜索结果中查找设备；调用方须持有 a.mu。
@@ -711,7 +801,7 @@ func (a *App) SaveBrowserCookies() (*media.CookiesInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	runtime.LogInfof(a.ctx, "已从登录浏览器保存 %d 条 Cookies", n)
+	a.logf("已从登录浏览器保存 %d 条 Cookies", n)
 
 	status := media.CookiesStatus()
 	return &status, nil

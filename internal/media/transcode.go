@@ -131,11 +131,11 @@ func (t *Transcoder) StreamTo(w io.Writer) (cancel func(), done <-chan struct{},
 	return t.launchLocked(cmd, nil, w, stderr)
 }
 
-// outputArgs 构造输出 MPEG-TS 直播流的 ffmpeg 参数。
+// outputArgs 构造输出直播流的 ffmpeg 参数。
 //
 // 关键性能考量：视频重编码是整条链路唯一的瓶颈（实测 1080p 约 2 倍、
 // 4K 约 1.4 倍实时），而视频轨道复制（-c copy）可达 18–29 倍实时且画质无损。
-// 因此只要源视频是电视可解码的编码（H.264），就一律复制直通；
+// 因此只要源视频是设备可解码的编码（H.264），就一律复制直通；
 // 音频按 plan 决定，不兼容时才重编码为 AAC（开销相对视频可忽略）。
 func outputArgs(plan Plan) []string {
 	args := []string{"-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn"}
@@ -154,7 +154,23 @@ func outputArgs(plan Plan) []string {
 		args = append(args, "-c:a", "aac", "-b:a", "192k", "-ac", "2")
 	}
 
-	return append(args, "-f", "mpegts", "pipe:1")
+	return append(args, containerArgs(plan.Container)...)
+}
+
+// containerArgs 返回目标容器的封装参数。
+//
+// MPEG-TS 是 DLNA 的通用基线，绝大多数设备都能直接播放；
+// 碎片化 MP4 用于设备只声明支持 MP4、不支持 TS 的场景：
+// frag_keyframe + empty_moov 让索引前置并按关键帧分片，
+// 从而可以边生成边推流（普通 MP4 需要回写索引，无法流式输出）。
+func containerArgs(container OutputContainer) []string {
+	if container == ContainerFMP4 {
+		return []string{
+			"-movflags", "frag_keyframe+empty_moov+default_base_moof",
+			"-f", "mp4", "pipe:1",
+		}
+	}
+	return []string{"-f", "mpegts", "pipe:1"}
 }
 
 // launchLocked 启动 ffmpeg 并建立取消逻辑；src 为其上游 yt-dlp 进程（可为 nil）。

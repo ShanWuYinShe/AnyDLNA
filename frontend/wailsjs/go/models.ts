@@ -32,6 +32,26 @@ export namespace main {
 	        this.mode = source["mode"];
 	    }
 	}
+	export class DeviceFormats {
+	    queried: boolean;
+	    supportsTs: boolean;
+	    supportsMp4: boolean;
+	    supportsMkv: boolean;
+	    videoMIMEs: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new DeviceFormats(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.queried = source["queried"];
+	        this.supportsTs = source["supportsTs"];
+	        this.supportsMp4 = source["supportsMp4"];
+	        this.supportsMkv = source["supportsMkv"];
+	        this.videoMIMEs = source["videoMIMEs"];
+	    }
+	}
 	export class DeviceInfo {
 	    udn: string;
 	    name: string;
@@ -96,6 +116,7 @@ export namespace main {
 	    height: number;
 	    sizeMB: number;
 	    mode: string;
+	    fastStart: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new PickedVideo(source);
@@ -112,6 +133,7 @@ export namespace main {
 	        this.height = source["height"];
 	        this.sizeMB = source["sizeMB"];
 	        this.mode = source["mode"];
+	        this.fastStart = source["fastStart"];
 	    }
 	}
 	export class Position {

@@ -22,6 +22,10 @@ export function CloseLoginBrowser() {
   return window['go']['main']['App']['CloseLoginBrowser']();
 }
 
+export function DeviceCapabilityInfo(arg1) {
+  return window['go']['main']['App']['DeviceCapabilityInfo'](arg1);
+}
+
 export function GetCastStatus() {
   return window['go']['main']['App']['GetCastStatus']();
 }
@@ -46,8 +50,8 @@ export function OpenLoginBrowser(arg1) {
   return window['go']['main']['App']['OpenLoginBrowser'](arg1);
 }
 
-export function PickVideo() {
-  return window['go']['main']['App']['PickVideo']();
+export function PickVideo(arg1) {
+  return window['go']['main']['App']['PickVideo'](arg1);
 }
 
 export function PlayPause() {
@@ -62,8 +66,8 @@ export function ResetLoginBrowser() {
   return window['go']['main']['App']['ResetLoginBrowser']();
 }
 
-export function ResolveURL(arg1) {
-  return window['go']['main']['App']['ResolveURL'](arg1);
+export function ResolveURL(arg1, arg2) {
+  return window['go']['main']['App']['ResolveURL'](arg1, arg2);
 }
 
 export function SaveBrowserCookies() {

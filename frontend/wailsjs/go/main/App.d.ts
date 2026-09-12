@@ -13,6 +13,8 @@ export function ClearCookies():Promise<void>;
 
 export function CloseLoginBrowser():Promise<void>;
 
+export function DeviceCapabilityInfo(arg1:string):Promise<main.DeviceFormats>;
+
 export function GetCastStatus():Promise<main.CastStatus>;
 
 export function GetConfig():Promise<media.Config>;
@@ -25,7 +27,7 @@ export function LoginBrowserStatus():Promise<main.LoginBrowserInfo>;
 
 export function OpenLoginBrowser(arg1:string):Promise<void>;
 
-export function PickVideo():Promise<main.PickedVideo>;
+export function PickVideo(arg1:string):Promise<main.PickedVideo>;
 
 export function PlayPause():Promise<void>;
 
@@ -33,7 +35,7 @@ export function Poll():Promise<main.Position>;
 
 export function ResetLoginBrowser():Promise<void>;
 
-export function ResolveURL(arg1:string):Promise<main.ResolvedInfo>;
+export function ResolveURL(arg1:string,arg2:string):Promise<main.ResolvedInfo>;
 
 export function SaveBrowserCookies():Promise<media.CookiesInfo>;
 
