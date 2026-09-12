@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/url"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -27,31 +25,37 @@ func HasYtDlp() bool {
 	return err == nil
 }
 
-// ytDlpCommonArgs 构造代理与 Cookie 来源相关的公共参数。
-// proxy 非空时经代理访问；cookieBrowser 非空时读取该浏览器的登录态
-// （YouTube 等站点对机房 IP 要求 bot 验证，需携带浏览器 Cookies）。
-func ytDlpCommonArgs(proxy, cookieBrowser string) []string {
+// ytDlpCommonArgs 构造代理与 Cookies 相关的公共参数。
+// manual 模式显式指定代理；none 模式传空串强制直连（否则 yt-dlp 会自行读取
+// 环境变量与操作系统代理）；system 模式不传参，交给 yt-dlp 自行探测。
+// CookieFile（内置浏览器导出）优先于 CookieBrowser（读取本机浏览器）。
+func ytDlpCommonArgs(opts Options) []string {
 	var args []string
-	if proxy != "" {
-		args = append(args, "--proxy", proxy)
+	switch opts.ProxyMode {
+	case ProxyModeManual:
+		args = append(args, "--proxy", opts.Proxy)
+	case ProxyModeNone:
+		args = append(args, "--proxy", "")
 	}
-	if cookieBrowser != "" {
-		args = append(args, "--cookies-from-browser", cookieBrowser)
+	if opts.CookieFile != "" {
+		args = append(args, "--cookies", opts.CookieFile)
+	} else if opts.CookieBrowser != "" {
+		args = append(args, "--cookies-from-browser", opts.CookieBrowser)
 	}
 	return args
 }
 
 // Resolve 用 yt-dlp 解析视频页面 URL，提取标题、时长与直播标记。
-// 仅读取元数据（-J），不拉取媒体流；proxy/cookieBrowser 语义见 ytDlpCommonArgs。
+// 仅读取元数据（-J），不拉取媒体流；opts 语义见 ytDlpCommonArgs。
 // yt-dlp 的报错（如站点验证提示）会截取关键内容返回，便于前端直接展示。
-func Resolve(ctx context.Context, url, proxy, cookieBrowser string) (*Resolved, error) {
+func Resolve(ctx context.Context, url string, opts Options) (*Resolved, error) {
 	if _, err := exec.LookPath("yt-dlp"); err != nil {
 		return nil, fmt.Errorf("未找到 yt-dlp，请先安装：brew install yt-dlp")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
-	args := append([]string{"-J", "--no-playlist", "--no-warnings"}, ytDlpCommonArgs(proxy, cookieBrowser)...)
+	args := append([]string{"-J", "--no-playlist", "--no-warnings"}, ytDlpCommonArgs(opts)...)
 	cmd := exec.CommandContext(ctx, "yt-dlp", append(args, url)...)
 	var stderr limitBuffer
 	cmd.Stderr = &stderr
@@ -99,41 +103,11 @@ func ytDlpErrTail(stderr string) string {
 	return tail
 }
 
-// TestProxy 通过代理请求一个轻量连通性端点，验证代理配置是否可用。
-func TestProxy(ctx context.Context, proxy string) error {
-	if proxy == "" {
-		return fmt.Errorf("未设置代理")
-	}
-	pu, err := url.Parse(proxy)
-	if err != nil || pu.Host == "" {
-		return fmt.Errorf("代理地址无效（示例：http://127.0.0.1:10809）")
-	}
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			Proxy: http.ProxyURL(pu), // 仅此请求走代理，不读环境变量
-		},
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://www.gstatic.com/generate_204", nil)
-	if err != nil {
-		return err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("代理不可用: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("代理可用但出口异常: HTTP %d", resp.StatusCode)
-	}
-	return nil
-}
-
 // ytDlpStreamArgs 构造把在线视频（已合并音视频）写到 stdout 的 yt-dlp 参数。
 // startSec>0 且非直播时用 --download-sections 实现快进到指定位置；
-// proxy/cookieBrowser 语义见 ytDlpCommonArgs。
-func ytDlpStreamArgs(url string, startSec float64, isLive bool, proxy, cookieBrowser string) []string {
-	args := append([]string{"-q", "--no-playlist", "--no-warnings"}, ytDlpCommonArgs(proxy, cookieBrowser)...)
+// opts 语义见 ytDlpCommonArgs。
+func ytDlpStreamArgs(url string, startSec float64, isLive bool, opts Options) []string {
+	args := append([]string{"-q", "--no-playlist", "--no-warnings"}, ytDlpCommonArgs(opts)...)
 	if startSec > 0 && !isLive {
 		args = append(args, "--download-sections", "*"+strconv.FormatFloat(startSec, 'f', 2, 64)+"-inf")
 	}

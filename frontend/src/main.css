@@ -42,6 +42,8 @@ body {
     background: #3a3f52; transition: background .3s;
 }
 .status-dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+.topbar-right { display: flex; align-items: center; gap: 12px; }
+.btn.icon-btn { padding: 6px 12px; font-size: 13px; }
 
 /* 主区 */
 .content {
@@ -135,3 +137,43 @@ input[type="range"] { accent-color: var(--accent); cursor: pointer; }
     box-shadow: 0 6px 24px rgba(0, 0, 0, .4);
     max-width: 70vw; z-index: 99;
 }
+
+/* 设置视图 */
+.content.settings { grid-template-columns: 1fr; }
+.panel.wide { min-height: auto; max-width: 780px; width: 100%; margin: 0 auto; gap: 18px; }
+
+.setting-group {
+    display: flex; flex-direction: column; gap: 10px;
+    background: var(--panel-2); border-radius: 10px; padding: 16px;
+}
+.setting-title { font-size: 15px; font-weight: 600; }
+.setting-desc { font-size: 12px; color: var(--text-dim); line-height: 1.6; }
+
+.radio-row {
+    display: flex; align-items: flex-start; gap: 10px;
+    padding: 8px 10px; border-radius: 8px; cursor: pointer;
+    transition: background .15s;
+}
+.radio-row:hover { background: #323753; }
+.radio-row input[type="radio"] { margin-top: 3px; accent-color: var(--accent); cursor: pointer; }
+.radio-row span { display: flex; flex-direction: column; gap: 3px; }
+.radio-row b { font-size: 14px; font-weight: 600; }
+.radio-row em { font-size: 12px; color: var(--text-dim); font-style: normal; line-height: 1.5; }
+
+.indent { margin-left: 26px; }
+.result-line { font-size: 13px; line-height: 1.6; padding: 8px 2px; }
+.result-line.ok { color: var(--ok); }
+.result-line.err { color: var(--danger); }
+
+.cookie-status {
+    font-size: 13px; color: var(--text-dim);
+    background: var(--panel); border-radius: 8px; padding: 10px 12px;
+}
+.cookie-status.ok { color: var(--ok); }
+
+.browser-hint { font-size: 12px; color: var(--text-dim); line-height: 1.6; padding: 2px; }
+.inline-hint { font-size: 12px; color: var(--text-dim); align-self: center; }
+
+.setting-actions { display: flex; justify-content: flex-end; }
+.setting-actions .btn { min-width: 160px; }
+

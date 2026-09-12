@@ -11,6 +11,7 @@ import (
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
+	"AnyDLNA/internal/browser"
 	"AnyDLNA/internal/dlna"
 	"AnyDLNA/internal/media"
 	"AnyDLNA/internal/netutil"
@@ -63,14 +64,21 @@ type Position struct {
 }
 
 // App 是绑定给前端的应用层。
+//
+// 锁纪律（避免再次出现「点了没反应」的死锁）：
+//   - a.mu 只保护内存状态的读写，临界区内绝不做网络、进程或等待用户的操作；
+//   - a.castMu 串行化投屏相关操作（投屏/停止/跳转），耗时 I/O 在持有
+//     castMu 但不持有 a.mu 的情况下执行。
 type App struct {
 	ctx           context.Context
 	streamSrv     *media.StreamServer
 	watcherCancel context.CancelFunc
-	proxy         string // 在线视频访问代理；空为直连
-	cookieBrowser string // yt-dlp 读取登录态的浏览器；空为不使用
+	browserMgr    *browser.Manager
+
+	castMu sync.Mutex // 串行化投屏操作，长耗时步骤不持有 a.mu
 
 	mu        sync.Mutex
+	cfg       media.Config   // 在线视频代理与 Cookies 配置
 	devices   []*dlna.Device // 已发现的渲染设备（搜索结果 + 被动监听累积）
 	renderer  *dlna.Renderer // 当前投屏目标
 	sessionID string         // 当前流会话 ID
@@ -79,14 +87,17 @@ type App struct {
 }
 
 // NewApp 创建应用实例。
-func NewApp() *App { return &App{} }
+func NewApp() *App {
+	return &App{cfg: media.DefaultConfig(), browserMgr: browser.NewManager("")}
+}
 
 // startup 在应用启动时创建流服务、加载配置并开启设备广播常驻监听。
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
-	cfg := media.LoadConfig()
-	a.proxy = cfg.Proxy
-	a.cookieBrowser = cfg.CookieBrowser
+	a.mu.Lock()
+	a.cfg = media.LoadConfig()
+	a.mu.Unlock()
+
 	srv, err := media.NewStreamServer()
 	if err != nil {
 		runtime.LogErrorf(ctx, "启动流服务失败: %v", err)
@@ -111,10 +122,13 @@ func (a *App) startup(ctx context.Context) {
 	}
 }
 
-// shutdown 在应用退出时清理流服务、监听与转码进程。
+// shutdown 在应用退出时清理流服务、监听、浏览器与转码进程。
 func (a *App) shutdown(ctx context.Context) {
 	if a.watcherCancel != nil {
 		a.watcherCancel()
+	}
+	if a.browserMgr != nil {
+		a.browserMgr.Close()
 	}
 	if a.streamSrv != nil {
 		a.streamSrv.Close()
@@ -238,17 +252,14 @@ func (a *App) PickVideo() (*PickedVideo, error) {
 	}, nil
 }
 
-// Cast 把视频投到指定设备：注册流会话并通过 AVTransport 下发播放。
+// Cast 把本地视频投到指定设备：注册流会话并通过 AVTransport 下发播放。
 func (a *App) Cast(udn, path string) (*CastStatus, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.castMu.Lock()
+	defer a.castMu.Unlock()
 
-	dev := a.findDeviceLocked(udn)
-	if dev == nil {
-		return nil, errors.New("设备未找到，请重新搜索")
-	}
-	if a.streamSrv == nil {
-		return nil, errors.New("流服务未启动")
+	dev, srv, err := a.castTarget(udn)
+	if err != nil {
+		return nil, err
 	}
 	if !media.HasFFmpeg() {
 		// 无 ffmpeg 时只能直出，不兼容的格式无法保证可播。
@@ -259,9 +270,6 @@ func (a *App) Cast(udn, path string) (*CastStatus, error) {
 			return nil, errors.New("未安装 ffmpeg，无法转码该格式；请执行 brew install ffmpeg")
 		}
 	}
-
-	// 停掉上一次投屏。
-	a.stopCastLocked()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -274,19 +282,19 @@ func (a *App) Cast(udn, path string) (*CastStatus, error) {
 
 	var sessionID, mime, mode string
 	if transcode {
-		sessionID = a.streamSrv.AddTranscode(path, info.Title)
+		sessionID = srv.AddTranscode(path, info.Title)
 		mime, mode = "video/mp2t", "transcode"
 	} else {
-		sessionID = a.streamSrv.AddDirect(path, media.MimeTypeFor(path), info.Title)
+		sessionID = srv.AddDirect(path, media.MimeTypeFor(path), info.Title)
 		mime, mode = media.MimeTypeFor(path), "direct"
 	}
 	ip, err := netutil.LANIP()
 	if err != nil {
-		a.streamSrv.Remove(sessionID)
+		srv.Remove(sessionID)
 		return nil, fmt.Errorf("获取本机局域网地址失败: %w", err)
 	}
-	playURL := a.streamSrv.URL(ip, sessionID, !transcode)
-	return a.startCastLocked(dev, sessionID, info.Title, playURL, mime, mode, ctx)
+	playURL := srv.URL(ip, sessionID, !transcode)
+	return a.startCast(dev, srv, sessionID, info.Title, playURL, mime, mode, ctx)
 }
 
 // ResolveURL 解析在线视频页面地址，返回标题、时长等预览信息。
@@ -294,12 +302,10 @@ func (a *App) ResolveURL(rawURL string) (*ResolvedInfo, error) {
 	if !media.HasYtDlp() {
 		return nil, errors.New("未安装 yt-dlp，无法解析在线视频；请执行 brew install yt-dlp")
 	}
-	a.mu.Lock()
-	proxy, cookieBrowser := a.proxy, a.cookieBrowser
-	a.mu.Unlock()
+	opts := a.resolveOptions()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	r, err := media.Resolve(ctx, rawURL, proxy, cookieBrowser)
+	r, err := media.Resolve(ctx, rawURL, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -313,43 +319,42 @@ func (a *App) ResolveURL(rawURL string) (*ResolvedInfo, error) {
 	}, nil
 }
 
-// GetOptions 返回当前在线视频访问配置（代理与 Cookie 来源）。
-func (a *App) GetOptions() *media.Config {
+// resolveOptions 读取当前配置并解析为 yt-dlp 所需参数。
+func (a *App) resolveOptions() media.Options {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	return &media.Config{Proxy: a.proxy, CookieBrowser: a.cookieBrowser}
-}
-
-// SetOptions 保存在线视频访问配置并持久化；代理为空表示直连。
-func (a *App) SetOptions(proxy, cookieBrowser string) error {
-	proxy = strings.TrimSpace(proxy)
-	cookieBrowser = strings.TrimSpace(strings.ToLower(cookieBrowser))
-	a.mu.Lock()
-	a.proxy = proxy
-	a.cookieBrowser = cookieBrowser
+	cfg := a.cfg
 	a.mu.Unlock()
-	return media.SaveConfig(media.Config{Proxy: proxy, CookieBrowser: cookieBrowser})
+	return cfg.ResolveOptions()
 }
 
-// TestProxy 验证代理连通性（通过代理访问轻量检测端点）。
-func (a *App) TestProxy(proxy string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
-	defer cancel()
-	return media.TestProxy(ctx, strings.TrimSpace(proxy))
+// castTarget 取出投屏目标设备与流服务，校验可用性。
+func (a *App) castTarget(udn string) (*dlna.Device, *media.StreamServer, error) {
+	a.mu.Lock()
+	dev := a.findDeviceLocked(udn)
+	srv := a.streamSrv
+	a.mu.Unlock()
+
+	if dev == nil {
+		return nil, nil, errors.New("设备未找到，请重新搜索")
+	}
+	if srv == nil {
+		return nil, nil, errors.New("流服务未启动")
+	}
+	return dev, srv, nil
 }
 
 // CastURL 把在线视频（YouTube、Bilibili 等视频网站页面或流地址）
 // 经本机 yt-dlp 拉流 + ffmpeg 转码中转后投到指定设备。
+//
+// 注意：yt-dlp 解析可能耗时数十秒，期间绝不能持有 a.mu，
+// 否则所有前端 IPC（轮询、状态读取）都会被阻塞。
 func (a *App) CastURL(udn, rawURL string) (*CastStatus, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.castMu.Lock()
+	defer a.castMu.Unlock()
 
-	dev := a.findDeviceLocked(udn)
-	if dev == nil {
-		return nil, errors.New("设备未找到，请重新搜索")
-	}
-	if a.streamSrv == nil {
-		return nil, errors.New("流服务未启动")
+	dev, srv, err := a.castTarget(udn)
+	if err != nil {
+		return nil, err
 	}
 	if !media.HasYtDlp() {
 		return nil, errors.New("未安装 yt-dlp，无法解析在线视频；请执行 brew install yt-dlp")
@@ -358,27 +363,23 @@ func (a *App) CastURL(udn, rawURL string) (*CastStatus, error) {
 		return nil, errors.New("未安装 ffmpeg，无法转码在线视频；请执行 brew install ffmpeg")
 	}
 
-	// 停掉上一次投屏。
-	a.stopCastLocked()
+	opts := a.resolveOptions()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	a.mu.Lock()
-	proxy, cookieBrowser := a.proxy, a.cookieBrowser
-	a.mu.Unlock()
-	resolved, err := media.Resolve(ctx, rawURL, proxy, cookieBrowser)
+	resolved, err := media.Resolve(ctx, rawURL, opts)
 	if err != nil {
 		return nil, err
 	}
-	sessionID := a.streamSrv.AddTranscodeURL(rawURL, resolved.Title, resolved.IsLive, proxy, cookieBrowser)
+	sessionID := srv.AddTranscodeURL(rawURL, resolved.Title, resolved.IsLive, opts)
 	ip, err := netutil.LANIP()
 	if err != nil {
-		a.streamSrv.Remove(sessionID)
+		srv.Remove(sessionID)
 		return nil, fmt.Errorf("获取本机局域网地址失败: %w", err)
 	}
-	playURL := a.streamSrv.URL(ip, sessionID, false)
-	return a.startCastLocked(dev, sessionID, resolved.Title, playURL, "video/mp2t", "stream", ctx)
+	playURL := srv.URL(ip, sessionID, false)
+	return a.startCast(dev, srv, sessionID, resolved.Title, playURL, "video/mp2t", "stream", ctx)
 }
 
 // findDeviceLocked 按 UDN 在最近一次搜索结果中查找设备；调用方须持有 a.mu。
@@ -391,121 +392,158 @@ func (a *App) findDeviceLocked(udn string) *dlna.Device {
 	return nil
 }
 
-// startCastLocked 向设备下发播放地址并登记投屏状态；失败时回收会话。调用方须持有 a.mu。
-func (a *App) startCastLocked(dev *dlna.Device, sessionID, title, playURL, streamMIME, mode string, ctx context.Context) (*CastStatus, error) {
+// startCast 向设备下发播放地址并登记投屏状态；失败时回收会话。
+// 调用方须持有 a.castMu，且不得持有 a.mu。
+func (a *App) startCast(dev *dlna.Device, srv *media.StreamServer, sessionID, title, playURL, streamMIME, mode string, ctx context.Context) (*CastStatus, error) {
+	// 先停掉上一次投屏（回收在 a.mu 之外完成）。
+	a.stopCast()
+
 	renderer := dlna.NewRenderer(dev)
 	if err := renderer.SetAVTransportURI(ctx, playURL, dlna.BuildDIDLMetadata(title, playURL, streamMIME)); err != nil {
-		a.streamSrv.Remove(sessionID)
+		srv.Remove(sessionID)
 		return nil, fmt.Errorf("下发播放地址失败: %w", err)
 	}
 	if err := renderer.Play(ctx); err != nil {
-		a.streamSrv.Remove(sessionID)
+		srv.Remove(sessionID)
 		return nil, fmt.Errorf("启动播放失败: %w", err)
 	}
+
+	a.mu.Lock()
 	a.renderer = renderer
 	a.sessionID = sessionID
 	a.castFile = title
 	a.castMode = mode
+	a.mu.Unlock()
+
 	return &CastStatus{Active: true, Device: dev.FriendlyName, File: title, Mode: mode}, nil
 }
 
-// PlayPause 切换播放/暂停。
-func (a *App) PlayPause() error {
+// stopCast 清理当前投屏状态并回收流会话。
+// 会话回收会等待转码进程退出，因此必须在释放 a.mu 之后进行。
+func (a *App) stopCast() {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.renderer == nil {
-		return errors.New("当前没有投屏")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-	state, err := a.renderer.TransportState(ctx)
-	if err == nil && state == "PLAYING" {
-		return a.renderer.Pause(ctx)
-	}
-	return a.renderer.Play(ctx)
-}
-
-// StopCast 停止投屏并清理流会话。
-func (a *App) StopCast() error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.renderer == nil {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	_ = a.renderer.Stop(ctx)
-	cancel()
-	a.stopCastLocked()
-	return nil
-}
-
-// stopCastLocked 清理当前投屏状态；调用方须持有 a.mu。
-func (a *App) stopCastLocked() {
-	if a.sessionID != "" && a.streamSrv != nil {
-		a.streamSrv.Remove(a.sessionID)
-	}
+	sessionID := a.sessionID
+	srv := a.streamSrv
 	a.renderer = nil
 	a.sessionID = ""
 	a.castFile = ""
 	a.castMode = ""
+	a.mu.Unlock()
+
+	if sessionID != "" && srv != nil {
+		srv.Remove(sessionID)
+	}
+}
+
+// currentRenderer 返回当前渲染器；没有投屏时返回错误。
+func (a *App) currentRenderer() (*dlna.Renderer, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.renderer == nil {
+		return nil, errors.New("当前没有投屏")
+	}
+	return a.renderer, nil
+}
+
+// PlayPause 切换播放/暂停。
+func (a *App) PlayPause() error {
+	renderer, err := a.currentRenderer()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	state, err := renderer.TransportState(ctx)
+	if err == nil && state == "PLAYING" {
+		return renderer.Pause(ctx)
+	}
+	return renderer.Play(ctx)
+}
+
+// StopCast 停止投屏并清理流会话。
+func (a *App) StopCast() error {
+	a.castMu.Lock()
+	defer a.castMu.Unlock()
+
+	renderer, _ := a.currentRenderer()
+	if renderer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		_ = renderer.Stop(ctx)
+		cancel()
+	}
+	a.stopCast()
+	return nil
 }
 
 // SeekTo 跳转到指定秒数。
 func (a *App) SeekTo(sec float64) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.renderer == nil {
-		return errors.New("当前没有投屏")
+	a.castMu.Lock()
+	defer a.castMu.Unlock()
+
+	renderer, err := a.currentRenderer()
+	if err != nil {
+		return err
 	}
 	if sec < 0 {
 		sec = 0
 	}
+
+	a.mu.Lock()
+	srv := a.streamSrv
+	sessionID, castFile, castMode := a.sessionID, a.castFile, a.castMode
+	a.mu.Unlock()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if a.castMode == "direct" {
-		return a.renderer.Seek(ctx, dlna.SeekUnitABSTime, dlna.FormatClock(sec))
+	if castMode == "direct" {
+		return renderer.Seek(ctx, dlna.SeekUnitABSTime, dlna.FormatClock(sec))
 	}
 	// 转码流（本地转码/在线中转）不支持随机拖动：让转码进程从新位置重启，
 	// 并让电视端重新拉流。
-	if err := a.streamSrv.SetTranscodeOffset(a.sessionID, sec); err != nil {
+	if srv == nil {
+		return errors.New("流服务未启动")
+	}
+	if err := srv.SetTranscodeOffset(sessionID, sec); err != nil {
 		return err
 	}
-	playURL := a.rebuildURLLocked(sec)
-	metadata := dlna.BuildDIDLMetadata(a.castFile, playURL, "video/mp2t")
-	if err := a.renderer.SetAVTransportURI(ctx, playURL, metadata); err != nil {
+	playURL := rebuildURL(srv, sessionID, sec)
+	if playURL == "" {
+		return errors.New("获取本机局域网地址失败")
+	}
+	metadata := dlna.BuildDIDLMetadata(castFile, playURL, "video/mp2t")
+	if err := renderer.SetAVTransportURI(ctx, playURL, metadata); err != nil {
 		return fmt.Errorf("重新下发播放地址失败: %w", err)
 	}
-	return a.renderer.Play(ctx)
+	return renderer.Play(ctx)
 }
 
-// rebuildURLLocked 重建当前会话的拉流 URL，附加 t 参数促使电视端视作新资源。
-func (a *App) rebuildURLLocked(sec float64) string {
+// rebuildURL 重建当前会话的拉流 URL，附加 t 参数促使电视端视作新资源。
+func rebuildURL(srv *media.StreamServer, sessionID string, sec float64) string {
 	ip, err := netutil.LANIP()
 	if err != nil {
 		return ""
 	}
-	base := a.streamSrv.URL(ip, a.sessionID, false)
+	base := srv.URL(ip, sessionID, false)
 	return base + "?t=" + fmt.Sprintf("%d", int(sec))
 }
 
 // Poll 拉取电视端当前播放状态与进度，供前端轮询。
 func (a *App) Poll() (*Position, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.renderer == nil {
+	renderer, err := a.currentRenderer()
+	if err != nil {
 		return &Position{}, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	pos := &Position{State: "STOPPED"}
-	state, err := a.renderer.TransportState(ctx)
+	state, err := renderer.TransportState(ctx)
 	if err != nil {
 		return pos, nil // 设备暂时无响应不算致命，前端下次再试。
 	}
 	pos.State = state
-	relTime, duration, err := a.renderer.PositionInfo(ctx)
+	relTime, duration, err := renderer.PositionInfo(ctx)
 	if err == nil {
 		if v, perr := dlna.ParseClock(relTime); perr == nil {
 			pos.PositionSec = v
@@ -519,29 +557,27 @@ func (a *App) Poll() (*Position, error) {
 
 // GetVolume 获取电视端音量（0-100）。
 func (a *App) GetVolume() (int, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.renderer == nil {
-		return 0, errors.New("当前没有投屏")
+	renderer, err := a.currentRenderer()
+	if err != nil {
+		return 0, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	return a.renderer.GetVolume(ctx)
+	return renderer.GetVolume(ctx)
 }
 
 // SetVolume 设置电视端音量（0-100）。
 func (a *App) SetVolume(volume int) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.renderer == nil {
-		return errors.New("当前没有投屏")
+	renderer, err := a.currentRenderer()
+	if err != nil {
+		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	return a.renderer.SetVolume(ctx, volume)
+	return renderer.SetVolume(ctx, volume)
 }
 
-// CastStatus 返回当前投屏状态快照。
+// GetCastStatus 返回当前投屏状态快照。
 func (a *App) GetCastStatus() *CastStatus {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -549,6 +585,156 @@ func (a *App) GetCastStatus() *CastStatus {
 		return &CastStatus{}
 	}
 	return &CastStatus{Active: true, Device: a.renderer.Device().FriendlyName, File: a.castFile, Mode: a.castMode}
+}
+
+// ---------- 设置：代理与 Cookies ----------
+
+// GetConfig 返回当前设置。
+func (a *App) GetConfig() *media.Config {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	cfg := a.cfg
+	return &cfg
+}
+
+// SetConfig 保存设置并持久化；保存后立即对后续解析/投屏生效。
+func (a *App) SetConfig(cfg media.Config) error {
+	cfg = cfg.Normalize()
+	if err := media.SaveConfig(cfg); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	a.cfg = cfg
+	a.mu.Unlock()
+	return nil
+}
+
+// SystemProxy 返回当前检测到的系统代理地址，供设置页展示。
+func (a *App) SystemProxy() string { return media.DetectSystemProxy() }
+
+// TestProxy 验证给定设置中代理的连通性，返回可直接展示的结论。
+func (a *App) TestProxy(cfg media.Config) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	return media.TestProxy(ctx, cfg.Normalize().ResolveOptions())
+}
+
+// BrowserInfo 描述本机可用于登录的浏览器。
+type BrowserInfo struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+// LoginBrowserInfo 描述登录浏览器的当前状态，供设置页展示。
+type LoginBrowserInfo struct {
+	// Supported 表示本机是否检测到可用浏览器。
+	Supported bool `json:"supported"`
+	// Running 表示应用启动的登录浏览器是否正在运行。
+	Running bool `json:"running"`
+	// Executable 是实际使用的浏览器可执行文件。
+	Executable string `json:"executable"`
+	// Browsers 是本机检测到的候选浏览器列表。
+	Browsers []BrowserInfo `json:"browsers"`
+}
+
+// LoginBrowserStatus 返回登录浏览器的可用性与运行状态。
+func (a *App) LoginBrowserStatus() *LoginBrowserInfo {
+	info := &LoginBrowserInfo{}
+	for _, b := range browser.Available() {
+		info.Browsers = append(info.Browsers, BrowserInfo{Name: b.Name, Path: b.Path})
+	}
+	info.Supported = len(info.Browsers) > 0
+	if a.browserMgr != nil {
+		info.Running = a.browserMgr.Running()
+		info.Executable = a.browserMgr.Executable()
+	}
+	return info
+}
+
+// OpenLoginBrowser 启动应用专用的浏览器窗口访问指定站点供用户登录。
+// 浏览器使用独立 profile，不读写用户日常浏览器的数据；登录状态会被保留，
+// 下次无需重复登录。用户登录完成后需调用 SaveBrowserCookies 取回 Cookies。
+//
+// 该方法只负责启动，不阻塞等待登录。
+func (a *App) OpenLoginBrowser(rawURL string) error {
+	if a.browserMgr == nil {
+		return errors.New("登录浏览器未初始化")
+	}
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		rawURL = "https://www.youtube.com"
+	}
+	if !strings.Contains(rawURL, "://") {
+		rawURL = "https://" + rawURL
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	_, err := a.browserMgr.Start(ctx, rawURL)
+	return err
+}
+
+// CloseLoginBrowser 关闭应用启动的登录浏览器。
+func (a *App) CloseLoginBrowser() {
+	if a.browserMgr != nil {
+		a.browserMgr.Close()
+	}
+}
+
+// SaveBrowserCookies 从登录浏览器读回全部 Cookie（含 HttpOnly）并保存为
+// yt-dlp 可读的文件。应在用户于浏览器中完成登录后调用。
+func (a *App) SaveBrowserCookies() (*media.CookiesInfo, error) {
+	if a.browserMgr == nil {
+		return nil, errors.New("登录浏览器未初始化")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cookies, err := a.browserMgr.Cookies(ctx)
+	if err != nil {
+		return nil, err
+	}
+	n, err := media.SaveCookies(toMediaCookies(cookies))
+	if err != nil {
+		return nil, err
+	}
+	runtime.LogInfof(a.ctx, "已从登录浏览器保存 %d 条 Cookies", n)
+
+	status := media.CookiesStatus()
+	return &status, nil
+}
+
+// toMediaCookies 把浏览器读出的 Cookie 转换为持久化结构。
+func toMediaCookies(in []browser.Cookie) []media.Cookie {
+	out := make([]media.Cookie, 0, len(in))
+	for _, c := range in {
+		out = append(out, media.Cookie{
+			Domain:    c.Domain,
+			Path:      c.Path,
+			Name:      c.Name,
+			Value:     c.Value,
+			Secure:    c.Secure,
+			HttpOnly:  c.HttpOnly,
+			ExpiresAt: c.ExpiresAt,
+		})
+	}
+	return out
+}
+
+// GetCookieStatus 返回登录浏览器导出 Cookies 的保存状态，供设置页展示。
+func (a *App) GetCookieStatus() *media.CookiesInfo {
+	info := media.CookiesStatus()
+	return &info
+}
+
+// ClearCookies 清除登录浏览器导出的 Cookies 文件（用于退出登录态）。
+func (a *App) ClearCookies() error { return media.DeleteCookies() }
+
+// ResetLoginBrowser 清除登录浏览器的独立 profile（彻底退出所有站点登录）。
+func (a *App) ResetLoginBrowser() error {
+	if a.browserMgr == nil {
+		return errors.New("登录浏览器未初始化")
+	}
+	return a.browserMgr.Reset()
 }
 
 // hostOf 从 URL 提取主机:端口。

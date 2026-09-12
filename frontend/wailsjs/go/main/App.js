@@ -14,16 +14,36 @@ export function CastURL(arg1, arg2) {
   return window['go']['main']['App']['CastURL'](arg1, arg2);
 }
 
+export function ClearCookies() {
+  return window['go']['main']['App']['ClearCookies']();
+}
+
+export function CloseLoginBrowser() {
+  return window['go']['main']['App']['CloseLoginBrowser']();
+}
+
 export function GetCastStatus() {
   return window['go']['main']['App']['GetCastStatus']();
 }
 
-export function GetOptions() {
-  return window['go']['main']['App']['GetOptions']();
+export function GetConfig() {
+  return window['go']['main']['App']['GetConfig']();
+}
+
+export function GetCookieStatus() {
+  return window['go']['main']['App']['GetCookieStatus']();
 }
 
 export function GetVolume() {
   return window['go']['main']['App']['GetVolume']();
+}
+
+export function LoginBrowserStatus() {
+  return window['go']['main']['App']['LoginBrowserStatus']();
+}
+
+export function OpenLoginBrowser(arg1) {
+  return window['go']['main']['App']['OpenLoginBrowser'](arg1);
 }
 
 export function PickVideo() {
@@ -38,8 +58,16 @@ export function Poll() {
   return window['go']['main']['App']['Poll']();
 }
 
+export function ResetLoginBrowser() {
+  return window['go']['main']['App']['ResetLoginBrowser']();
+}
+
 export function ResolveURL(arg1) {
   return window['go']['main']['App']['ResolveURL'](arg1);
+}
+
+export function SaveBrowserCookies() {
+  return window['go']['main']['App']['SaveBrowserCookies']();
 }
 
 export function SearchDevices(arg1) {
@@ -50,8 +78,8 @@ export function SeekTo(arg1) {
   return window['go']['main']['App']['SeekTo'](arg1);
 }
 
-export function SetOptions(arg1, arg2) {
-  return window['go']['main']['App']['SetOptions'](arg1, arg2);
+export function SetConfig(arg1) {
+  return window['go']['main']['App']['SetConfig'](arg1);
 }
 
 export function SetVolume(arg1) {
@@ -60,6 +88,10 @@ export function SetVolume(arg1) {
 
 export function StopCast() {
   return window['go']['main']['App']['StopCast']();
+}
+
+export function SystemProxy() {
+  return window['go']['main']['App']['SystemProxy']();
 }
 
 export function TestProxy(arg1) {

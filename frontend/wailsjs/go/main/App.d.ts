@@ -9,11 +9,21 @@ export function Cast(arg1:string,arg2:string):Promise<main.CastStatus>;
 
 export function CastURL(arg1:string,arg2:string):Promise<main.CastStatus>;
 
+export function ClearCookies():Promise<void>;
+
+export function CloseLoginBrowser():Promise<void>;
+
 export function GetCastStatus():Promise<main.CastStatus>;
 
-export function GetOptions():Promise<media.Config>;
+export function GetConfig():Promise<media.Config>;
+
+export function GetCookieStatus():Promise<media.CookiesInfo>;
 
 export function GetVolume():Promise<number>;
+
+export function LoginBrowserStatus():Promise<main.LoginBrowserInfo>;
+
+export function OpenLoginBrowser(arg1:string):Promise<void>;
 
 export function PickVideo():Promise<main.PickedVideo>;
 
@@ -21,16 +31,22 @@ export function PlayPause():Promise<void>;
 
 export function Poll():Promise<main.Position>;
 
+export function ResetLoginBrowser():Promise<void>;
+
 export function ResolveURL(arg1:string):Promise<main.ResolvedInfo>;
+
+export function SaveBrowserCookies():Promise<media.CookiesInfo>;
 
 export function SearchDevices(arg1:number):Promise<Array<main.DeviceInfo>>;
 
 export function SeekTo(arg1:number):Promise<void>;
 
-export function SetOptions(arg1:string,arg2:string):Promise<void>;
+export function SetConfig(arg1:media.Config):Promise<void>;
 
 export function SetVolume(arg1:number):Promise<void>;
 
 export function StopCast():Promise<void>;
 
-export function TestProxy(arg1:string):Promise<void>;
+export function SystemProxy():Promise<string>;
+
+export function TestProxy(arg1:media.Config):Promise<string>;

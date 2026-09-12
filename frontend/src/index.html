@@ -11,10 +11,15 @@
 <div id="app">
     <header class="topbar">
         <div class="brand">AnyDLNA <span class="sub">本地视频投屏</span></div>
-        <div class="status-dot" id="castDot"></div>
+        <div class="topbar-right">
+            <button class="btn icon-btn hidden" id="btnBack">← 返回</button>
+            <button class="btn icon-btn" id="btnSettings">⚙ 设置</button>
+            <div class="status-dot" id="castDot"></div>
+        </div>
     </header>
 
-    <main class="content">
+    <!-- 主视图：设备与视频来源 -->
+    <main class="content" id="mainView">
         <section class="panel">
             <div class="panel-head">
                 <h2>播放设备</h2>
@@ -37,11 +42,6 @@
                 <input class="url-input" id="urlInput" placeholder="粘贴视频链接：YouTube / Bilibili / m3u8 / mp4…"/>
                 <button class="btn" id="btnResolve">解析</button>
             </div>
-            <div class="url-row">
-                <input class="url-input" id="proxyInput" placeholder="代理（访问 YouTube 等被墙站点时填写，如 http://127.0.0.1:10809；留空直连）"/>
-                <input class="url-input narrow" id="cookieInput" placeholder="Cookie 来源：chrome/safari/firefox"/>
-                <button class="btn" id="btnTestProxy">测试</button>
-            </div>
             <div class="video-card hidden" id="videoCard">
                 <div class="video-name" id="vName"></div>
                 <div class="video-meta" id="vMeta"></div>
@@ -49,6 +49,111 @@
                 <button class="btn primary big" id="btnCast">投屏到选中设备</button>
             </div>
             <div class="hint" id="videoHint">本地视频任意格式；在线视频由本机解析转码后中转，电视端无需支持该网站</div>
+        </section>
+    </main>
+
+    <!-- 设置视图：代理与 Cookies -->
+    <main class="content settings hidden" id="settingsView">
+        <section class="panel wide">
+            <div class="panel-head">
+                <h2>设置</h2>
+            </div>
+
+            <!-- 代理 -->
+            <div class="setting-group">
+                <div class="setting-title">网络代理</div>
+                <div class="setting-desc">仅作用于在线视频的解析与拉流；设备发现与投屏流始终走局域网直连。</div>
+
+                <label class="radio-row">
+                    <input type="radio" name="proxyMode" value="system"/>
+                    <span>
+                        <b>跟随系统代理</b>
+                        <em id="sysProxyHint">正在检测…</em>
+                    </span>
+                </label>
+                <label class="radio-row">
+                    <input type="radio" name="proxyMode" value="manual"/>
+                    <span><b>手动配置</b></span>
+                </label>
+                <div class="url-row indent hidden" id="proxyUrlRow">
+                    <input class="url-input" id="proxyInput" placeholder="如 http://127.0.0.1:10809 或 socks5://127.0.0.1:1080"/>
+                </div>
+                <label class="radio-row">
+                    <input type="radio" name="proxyMode" value="none"/>
+                    <span>
+                        <b>不使用代理</b>
+                        <em>显式直连；即使系统设置了代理，yt-dlp 也不会使用它</em>
+                    </span>
+                </label>
+
+                <div class="url-row">
+                    <button class="btn" id="btnTestProxy">测试代理连通性</button>
+                </div>
+                <div class="result-line hidden" id="proxyResult"></div>
+            </div>
+
+            <!-- Cookies -->
+            <div class="setting-group">
+                <div class="setting-title">站点登录状态（Cookies）</div>
+                <div class="setting-desc">YouTube 等站点常要求人机验证，提供已登录的 Cookies 才能正常解析与播放。</div>
+
+                <label class="radio-row">
+                    <input type="radio" name="cookieMode" value="browser"/>
+                    <span>
+                        <b>读取本机浏览器（推荐）</b>
+                        <em>直接读取你日常浏览器里已登录的状态，无需额外操作</em>
+                    </span>
+                </label>
+                <div class="url-row indent hidden" id="browserRow">
+                    <select class="url-input" id="cookieBrowser">
+                        <option value="chrome">Chrome</option>
+                        <option value="edge">Edge</option>
+                        <option value="firefox">Firefox</option>
+                        <option value="safari">Safari</option>
+                        <option value="brave">Brave</option>
+                        <option value="chromium">Chromium</option>
+                        <option value="opera">Opera</option>
+                        <option value="vivaldi">Vivaldi</option>
+                        <option value="whale">Whale</option>
+                    </select>
+                </div>
+
+                <label class="radio-row">
+                    <input type="radio" name="cookieMode" value="loginbrowser"/>
+                    <span>
+                        <b>用应用登录浏览器</b>
+                        <em>打开独立浏览器窗口登录，再把登录状态交给应用</em>
+                    </span>
+                </label>
+                <div class="indent hidden" id="loginBrowserBox">
+                    <div class="url-row">
+                        <input class="url-input" id="loginSite" value="https://www.youtube.com"/>
+                        <button class="btn" id="btnOpenLogin">打开登录窗口</button>
+                    </div>
+                    <div class="browser-hint" id="browserHint"></div>
+                    <div class="url-row">
+                        <button class="btn primary" id="btnSaveCookies">我已登录，保存 Cookies</button>
+                        <button class="btn" id="btnCloseLogin">关闭登录窗口</button>
+                    </div>
+                    <div class="url-row">
+                        <button class="btn" id="btnClearCookies">清除已存 Cookies</button>
+                        <button class="btn danger" id="btnResetLogin">重置登录状态</button>
+                    </div>
+                    <div class="browser-hint">「清除已存 Cookies」只删除交给应用的登录状态；「重置登录状态」会同时清空登录窗口里的所有站点登录。</div>
+                    <div class="result-line hidden" id="loginResult"></div>
+                </div>
+
+                <label class="radio-row">
+                    <input type="radio" name="cookieMode" value="none"/>
+                    <span><b>不使用 Cookies</b></span>
+                </label>
+
+                <div class="cookie-status" id="cookieStatus">尚未保存 Cookies</div>
+            </div>
+
+            <div class="setting-actions">
+                <button class="btn primary big" id="btnSaveSettings">保存设置</button>
+            </div>
         </section>
     </main>
 

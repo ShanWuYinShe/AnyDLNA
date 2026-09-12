@@ -8,6 +8,7 @@ const state = {
     polling: null,       // 轮询定时器
     scrubbing: false,    // 用户正在拖动进度条
     stoppedCount: 0,     // 连续 STOPPED 次数，用于判定投屏结束
+    config: null,        // 当前设置（代理与 Cookies）
 };
 
 function toast(msg, ms = 3600) {
@@ -30,6 +31,11 @@ function call(method, ...args) {
         toast(msg);
         throw err;
     });
+}
+
+// errText 把 Go 返回的错误统一转成可展示文本（不弹 toast，供内联展示）。
+function errText(err) {
+    return typeof err === 'string' ? err : (err && err.message) || '操作失败';
 }
 
 // ---------- 设备 ----------
@@ -93,40 +99,234 @@ if (window.runtime && window.runtime.EventsOn) {
     });
 }
 
-// ---------- 代理设置 ----------
+// ---------- 设置视图切换 ----------
 
-async function initProxy() {
-    try {
-        const opt = await window.go.main.App.GetOptions();
-        $('proxyInput').value = opt.proxy || '';
-        $('cookieInput').value = opt.cookieBrowser || '';
-    } catch { /* 忽略，保持为空 */ }
+function showSettings() {
+    $('mainView').classList.add('hidden');
+    $('settingsView').classList.remove('hidden');
+    $('btnSettings').classList.add('hidden');
+    $('btnBack').classList.remove('hidden');
+    loadSettings();
 }
 
-async function saveProxy() {
+function showMain() {
+    $('settingsView').classList.add('hidden');
+    $('mainView').classList.remove('hidden');
+    $('btnBack').classList.add('hidden');
+    $('btnSettings').classList.remove('hidden');
+}
+
+// ---------- 设置：加载与保存 ----------
+
+async function loadSettings() {
+    let cfg;
     try {
-        await call('SetOptions', $('proxyInput').value.trim(), $('cookieInput').value.trim());
-        toast($('proxyInput').value.trim() ? '代理设置已保存并生效' : '已切换为直连');
+        cfg = await window.go.main.App.GetConfig();
+    } catch {
+        toast('读取设置失败');
+        return;
+    }
+    state.config = cfg;
+
+    const proxyMode = cfg.proxyMode || 'system';
+    document.querySelector(`input[name="proxyMode"][value="${proxyMode}"]`).checked = true;
+    $('proxyInput').value = cfg.proxyUrl || '';
+
+    const cookieMode = cfg.cookieMode || 'none';
+    document.querySelector(`input[name="cookieMode"][value="${cookieMode}"]`).checked = true;
+    if (cfg.cookieBrowser) {
+        $('cookieBrowser').value = cfg.cookieBrowser;
+    }
+
+    syncProxyRows();
+    syncCookieRows();
+    // 同时刷新系统代理提示与 Cookies 状态。
+    refreshSystemProxy();
+    refreshCookieStatus();
+}
+
+// syncProxyRows 按当前代理模式显示/隐藏手动地址输入。
+function syncProxyRows() {
+    const mode = document.querySelector('input[name="proxyMode"]:checked').value;
+    $('proxyUrlRow').classList.toggle('hidden', mode !== 'manual');
+}
+
+// syncCookieRows 按当前 Cookies 模式显示对应的附加选项。
+function syncCookieRows() {
+    const mode = document.querySelector('input[name="cookieMode"]:checked').value;
+    $('browserRow').classList.toggle('hidden', mode !== 'browser');
+    $('loginBrowserBox').classList.toggle('hidden', mode !== 'loginbrowser');
+    if (mode === 'loginbrowser') {
+        refreshLoginBrowser();
+    }
+}
+
+// refreshSystemProxy 展示当前检测到的系统代理，便于用户判断「跟随系统」是否有效。
+async function refreshSystemProxy() {
+    try {
+        const proxy = await window.go.main.App.SystemProxy();
+        $('sysProxyHint').textContent = proxy
+            ? `当前检测到：${proxy}`
+            : '未检测到系统代理或代理环境变量，将直连访问';
+    } catch {
+        $('sysProxyHint').textContent = '检测系统代理失败';
+    }
+}
+
+// collectConfig 从界面收集设置。
+function collectConfig() {
+    return {
+        proxyMode: document.querySelector('input[name="proxyMode"]:checked').value,
+        proxyUrl: $('proxyInput').value.trim(),
+        cookieMode: document.querySelector('input[name="cookieMode"]:checked').value,
+        cookieBrowser: $('cookieBrowser').value,
+    };
+}
+
+async function saveSettings() {
+    const cfg = collectConfig();
+    if (cfg.proxyMode === 'manual' && !cfg.proxyUrl) {
+        toast('手动代理模式下请填写代理地址');
+        return;
+    }
+    try {
+        await call('SetConfig', cfg);
+        state.config = cfg;
+        toast('设置已保存');
     } catch { /* toast 已提示 */ }
 }
 
+// showResult 在指定位置展示一行结果（成功/失败着色）。
+function showResult(el, text, ok) {
+    el.textContent = text;
+    el.classList.remove('hidden', 'ok', 'err');
+    el.classList.add(ok ? 'ok' : 'err');
+}
+
 async function testProxy() {
-    const p = $('proxyInput').value.trim();
-    if (!p) { toast('请先填写代理地址'); return; }
-    await saveProxy();
+    const cfg = collectConfig();
     $('btnTestProxy').disabled = true;
     $('btnTestProxy').textContent = '测试中…';
     try {
-        await window.go.main.App.TestProxy(p);
-        toast('代理可用；如 YouTube 提示验证，请在 Cookie 来源填 chrome 等浏览器名');
+        const msg = await window.go.main.App.TestProxy(cfg);
+        showResult($('proxyResult'), msg, true);
     } catch (err) {
-        const msg = typeof err === 'string' ? err : (err && err.message) || '测试失败';
-        toast(msg);
-    }
-    finally {
+        showResult($('proxyResult'), errText(err), false);
+    } finally {
         $('btnTestProxy').disabled = false;
-        $('btnTestProxy').textContent = '测试';
+        $('btnTestProxy').textContent = '测试代理连通性';
     }
+}
+
+// ---------- 设置：Cookies ----------
+
+async function refreshCookieStatus() {
+    let info;
+    try {
+        info = await window.go.main.App.GetCookieStatus();
+    } catch {
+        return;
+    }
+    const el = $('cookieStatus');
+    if (info && info.exists) {
+        el.textContent = `已保存 ${info.count} 条 Cookies（${info.savedAt}）`;
+        el.classList.add('ok');
+    } else {
+        el.textContent = '尚未保存 Cookies';
+        el.classList.remove('ok');
+    }
+}
+
+// refreshLoginBrowser 展示本机检测到的浏览器与登录窗口运行状态；
+// 没有可用浏览器时提示改用「读取本机浏览器」。
+async function refreshLoginBrowser() {
+    let info;
+    try {
+        info = await window.go.main.App.LoginBrowserStatus();
+    } catch {
+        return;
+    }
+    const el = $('browserHint');
+    if (!info.supported) {
+        el.textContent = '未检测到 Chrome / Edge / Brave 等浏览器：请改用「读取本机浏览器」，或先安装其中之一。';
+        $('btnOpenLogin').disabled = true;
+        $('btnSaveCookies').disabled = true;
+        return;
+    }
+    $('btnOpenLogin').disabled = false;
+    $('btnSaveCookies').disabled = false;
+    const names = (info.browsers || []).map((b) => b.name).join(' / ');
+    el.textContent = info.running
+        ? `登录窗口正在运行（${info.executable || names}）`
+        : `将使用：${names}`;
+}
+
+// openLoginBrowser 打开应用专用浏览器窗口，供用户登录站点。
+async function openLoginBrowser() {
+    const site = $('loginSite').value.trim() || 'https://www.youtube.com';
+    $('btnOpenLogin').disabled = true;
+    try {
+        await call('OpenLoginBrowser', site);
+        showResult($('loginResult'),
+            '登录窗口已打开：请在该窗口中完成登录，然后点击「我已登录，保存 Cookies」。', true);
+        await refreshLoginBrowser();
+    } catch (err) {
+        showResult($('loginResult'), errText(err), false);
+    } finally {
+        $('btnOpenLogin').disabled = false;
+    }
+}
+
+// closeLoginBrowser 关闭登录窗口，避免浏览器进程长期驻留（登录状态保留）。
+async function closeLoginBrowser() {
+    try {
+        await call('CloseLoginBrowser');
+        showResult($('loginResult'), '已关闭登录窗口（登录状态已保留）。', true);
+        await refreshLoginBrowser();
+    } catch { /* toast 已提示 */ }
+}
+
+// resetLoginBrowser 清除登录窗口的独立 profile，等同于退出所有站点登录。
+async function resetLoginBrowser() {
+    try {
+        await call('ResetLoginBrowser');
+        showResult($('loginResult'), '已重置登录状态，下次需重新登录。', true);
+        await refreshCookieStatus();
+        await refreshLoginBrowser();
+    } catch { /* toast 已提示 */ }
+}
+
+// saveBrowserCookies 把登录浏览器中的 Cookies 读回并保存。
+async function saveBrowserCookies() {
+    const cfg = collectConfig();
+    // 保存后必须让设置处于 loginbrowser 模式，否则 Cookies 不会被使用。
+    if (cfg.cookieMode !== 'loginbrowser') {
+        document.querySelector('input[name="cookieMode"][value="loginbrowser"]').checked = true;
+        syncCookieRows();
+        cfg.cookieMode = 'loginbrowser';
+    }
+    $('btnSaveCookies').disabled = true;
+    $('btnSaveCookies').textContent = '保存中…';
+    try {
+        const info = await window.go.main.App.SaveBrowserCookies();
+        await window.go.main.App.SetConfig(cfg);
+        state.config = cfg;
+        showResult($('loginResult'), `已保存 ${info.count} 条 Cookies`, true);
+        await refreshCookieStatus();
+    } catch (err) {
+        showResult($('loginResult'), errText(err), false);
+    } finally {
+        $('btnSaveCookies').disabled = false;
+        $('btnSaveCookies').textContent = '我已登录，保存 Cookies';
+    }
+}
+
+async function clearCookies() {
+    try {
+        await call('ClearCookies');
+        showResult($('loginResult'), '已清除应用保存的 Cookies', true);
+        await refreshCookieStatus();
+    } catch { /* toast 已提示 */ }
 }
 
 // ---------- 视频来源（本地文件 / 在线链接）----------
@@ -142,12 +342,16 @@ async function resolveURL() {
     const url = $('urlInput').value.trim();
     if (!url) { toast('请先粘贴视频链接'); return; }
     $('btnResolve').disabled = true;
+    $('btnResolve').textContent = '解析中…';
     try {
         const r = await call('ResolveURL', url);
         state.pending = { type: 'url', ...r };
         renderPending();
     } catch { /* toast 已提示 */ }
-    finally { $('btnResolve').disabled = false; }
+    finally {
+        $('btnResolve').disabled = false;
+        $('btnResolve').textContent = '解析';
+    }
 }
 
 function renderPending() {
@@ -176,12 +380,22 @@ async function cast() {
     if (!state.selectedUDN) { toast('请先选择一台播放设备'); return; }
     const p = state.pending;
     if (!p) { toast('请先选择本地视频或解析在线链接'); return; }
+
+    // 在线视频解析可能耗时较久，给出明确反馈，避免用户以为界面无响应。
+    const btn = $('btnCast');
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = p.type === 'url' ? '正在解析并投屏…' : '正在投屏…';
     try {
         const st = p.type === 'file'
             ? await call('Cast', state.selectedUDN, p.path)
             : await call('CastURL', state.selectedUDN, p.url);
         startControls(st);
     } catch { /* toast 已提示 */ }
+    finally {
+        btn.disabled = false;
+        btn.textContent = label;
+    }
 }
 
 function startControls(st) {
@@ -245,10 +459,23 @@ $('urlInput').onkeydown = (e) => { if (e.key === 'Enter') resolveURL(); };
 $('btnCast').onclick = cast;
 $('btnStop').onclick = stopCast;
 $('btnPlayPause').onclick = () => call('PlayPause').catch(() => {});
+
+// 设置视图。
+$('btnSettings').onclick = showSettings;
+$('btnBack').onclick = showMain;
+$('btnSaveSettings').onclick = saveSettings;
 $('btnTestProxy').onclick = testProxy;
-$('proxyInput').onchange = saveProxy;
-$('cookieInput').onchange = saveProxy;
-initProxy();
+$('btnOpenLogin').onclick = openLoginBrowser;
+$('btnSaveCookies').onclick = saveBrowserCookies;
+$('btnCloseLogin').onclick = closeLoginBrowser;
+$('btnResetLogin').onclick = resetLoginBrowser;
+$('btnClearCookies').onclick = clearCookies;
+document.querySelectorAll('input[name="proxyMode"]').forEach((el) => {
+    el.onchange = syncProxyRows;
+});
+document.querySelectorAll('input[name="cookieMode"]').forEach((el) => {
+    el.onchange = syncCookieRows;
+});
 
 const seek = $('seek');
 seek.oninput = () => { state.scrubbing = true; };

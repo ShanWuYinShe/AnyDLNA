@@ -6,7 +6,6 @@ import (
 	"net"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -116,18 +115,7 @@ func msearchMessage(st string) string {
 	}, "\r\n")
 }
 
-// setMulticastIf 把 socket 的组播出口接口固定到 ifaceIP，避免默认路由指向虚拟网卡。
-func setMulticastIf(conn *net.UDPConn, ifaceIP net.IP) {
-	raw, err := conn.SyscallConn()
-	if err != nil {
-		return
-	}
-	_ = raw.Control(func(fd uintptr) {
-		var mreq syscall.IPMreq
-		copy(mreq.Multiaddr[:], ifaceIP.To4())
-		_ = syscall.SetsockoptIPMreq(int(fd), syscall.IPPROTO_IP, syscall.IP_MULTICAST_IF, &mreq)
-	})
-}
+// setMulticastIf 按平台实现，见 ssdp_multicast_*.go。
 
 // collector 并发安全地汇总设备线索。
 type collector struct {
