@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -45,13 +48,21 @@ type Transcoder struct {
 	opts    Options // 在线源的代理与 Cookies 配置
 	plan    Plan    // 输出方式（换封装 / 转码）
 	offset  int64   // 转码起始位置（毫秒），供下一次启动使用
-	pipe    bool    // 管道模式：yt-dlp 下载经管道喂 ffmpeg；否则直链模式
+	pipe    bool    // 管道模式：yt-dlp 下载经管道喂 ffmpeg；否则 Go 传输模式
 	streams map[*stream]struct{}
 
 	// cachedURLs 是已解析的直链（1 条为一体流，2 条为分离音视频），
 	// cachedAt 为解析时间，TTL 内复用，过期或跳转失败时重取。仅直链模式用。
 	cachedURLs []string
 	cachedAt   time.Time
+
+	// Go 传输模式的本机服务：Upstream 并发拉取上游并缓存，ffmpeg 以
+	// 普通 HTTP 输入（含 -ss Range 定位）从回环地址读取。随 Transcoder
+	// 创建而惰性启动，随 Stop 关闭；跳转（RestartAt）保留缓存。
+	directLn   net.Listener
+	directSrv  *http.Server
+	directUps  []*Upstream
+	directBase string
 
 	// lastStderr 仅用于出错诊断，记录最近一次启动的 stderr 缓冲。
 	lastStderr *limitBuffer
@@ -76,9 +87,16 @@ func NewTranscoder(path string, plan Plan) *Transcoder {
 // NewURLTranscoder 创建针对在线视频源的转码器。
 // plan 决定是否复制视频/音频轨道；零值 Plan 视为完整转码。
 // extractor 决定拉流模式：需管道模式的站点（见 NeedsPipeMode）走 yt-dlp
-// 下载管道，其余走 ffmpeg 直连直链。
-func NewURLTranscoder(url string, isLive bool, opts Options, plan Plan, extractor string) *Transcoder {
-	return &Transcoder{srcURL: url, isLive: isLive, opts: opts, plan: plan.orTranscode(), pipe: NeedsPipeMode(extractor)}
+// 下载管道，其余走 Go 原生传输（Upstream 拉取 + ffmpeg 本机 HTTP 输入）。
+// urls 是已解析的直链（ResolveDirect 附带返回），为空则首次拉流时回退到
+// DirectURLs 再取一次；传入时记为缓存起点，避免重复解析。
+func NewURLTranscoder(url string, isLive bool, opts Options, plan Plan, extractor string, urls []string) *Transcoder {
+	tc := &Transcoder{srcURL: url, isLive: isLive, opts: opts, plan: plan.orTranscode(), pipe: NeedsPipeMode(extractor)}
+	if len(urls) > 0 {
+		tc.cachedURLs = append([]string(nil), urls...)
+		tc.cachedAt = time.Now()
+	}
+	return tc
 }
 
 // orTranscode 把未设定模式的 Plan 归一化为完整转码，避免误用零值导致参数缺失。
@@ -100,11 +118,29 @@ func (t *Transcoder) RestartAt(seconds float64) {
 	t.stopAllLocked()
 }
 
-// Stop 终止全部正在进行的拉流进程。
+// Stop 终止全部正在进行的拉流进程，并关闭 Go 传输的本机服务与缓存。
 func (t *Transcoder) Stop() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.stopAllLocked()
+	t.closeDirectLocked()
+}
+
+// closeDirectLocked 关闭 Go 传输的本机服务与上游拉取器；调用方须持有 t.mu。
+func (t *Transcoder) closeDirectLocked() {
+	if t.directSrv != nil {
+		_ = t.directSrv.Close()
+		t.directSrv = nil
+	}
+	if t.directLn != nil {
+		_ = t.directLn.Close()
+		t.directLn = nil
+	}
+	for _, up := range t.directUps {
+		_ = up.Close()
+	}
+	t.directUps = nil
+	t.directBase = ""
 }
 
 // stopAllLocked 终止所有已登记的拉流进程并等待回收；调用方须持有 t.mu。
@@ -211,36 +247,52 @@ func (t *Transcoder) StreamTo(w io.Writer) (cancel func(), done <-chan struct{},
 		}
 		return t.launchLocked(cmd, videoCmd, audioCmd, w, stderr)
 	} else {
-		// 直链模式：yt-dlp 只负责解析出直链（-g，不下载），ffmpeg 直接对
-		// 直链完成下载、定位（-ss 输入级 Range 定位）、合并全部操作。
-		// 跳转不再杀进程重下：同一组直链 + 新的 -ss 即可，电视重拉流就行。
-		urls, err := t.directURLsLocked()
+		// Go 传输模式：Upstream（Go 原生，代理/并发/重试可控）拉取直链并
+		// 在本机回环服务，ffmpeg 以普通 HTTP 输入读取，只做合并/remux。
+		// 跳转 = 同一缓存 + 新的 -ss，Upstream 按需优先拉取跳转位置，
+		// 电视重拉即跳转，不再杀进程重下。
+		inputs, audioIdx, fallback, err := t.ensureDirectLocked()
 		if err != nil {
 			return func() {}, nil, err
 		}
-		// -ss 必须紧贴在每个 -i 之前才是输入级定位（走 HTTP Range，
-		// 直链可寻址）；放 -i 之后会变成输出选项，定位失效。
+		if fallback {
+			// 播放列表（直播 m3u8 等）：相对分片地址无法经 Go 中转，
+			// 回退到 ffmpeg 直连（需 http 代理；socks 下由 CastURL 拦截）。
+			urls, uerr := t.directURLsLocked()
+			if uerr != nil {
+				return func() {}, nil, uerr
+			}
+			var ss string
+			if ssSec > 0 && !t.isLive {
+				ss = strconv.FormatFloat(ssSec, 'f', 2, 64)
+			}
+			for _, u := range urls {
+				if ss != "" {
+					args = append(args, "-ss", ss)
+				}
+				args = append(args, "-i", u)
+			}
+			cmd := toolCmd("ffmpeg", append(args, outputArgs(t.plan, audioIdx)...)...)
+			setProcGroup(cmd)
+			if proxy := EffectiveProxy(t.opts); IsHTTPProxy(proxy) {
+				cmd.Env = EnvWithHTTPProxy(cmd.Env, proxy)
+			}
+			return t.launchLocked(cmd, nil, nil, w, stderr)
+		}
+		// -ss 紧贴每个 -i 之前才是输入级定位（对本机 HTTP 走 Range）；
+		// 回环地址无需代理，ffmpeg 不再直连 CDN。
 		var ss string
 		if ssSec > 0 && !t.isLive {
 			ss = strconv.FormatFloat(ssSec, 'f', 2, 64)
 		}
-		audioIdx := 0
-		for _, u := range urls {
+		for _, u := range inputs {
 			if ss != "" {
 				args = append(args, "-ss", ss)
 			}
 			args = append(args, "-i", u)
 		}
-		if len(urls) == 2 {
-			audioIdx = 1
-		}
 		cmd := toolCmd("ffmpeg", append(args, outputArgs(t.plan, audioIdx)...)...)
 		setProcGroup(cmd)
-		// ffmpeg 直连 CDN，必须从设置里的代理走：它只认 http(s) 代理，
-		// 从环境变量读取；socks 下无法工作，由 CastURL 提前拦截。
-		if proxy := EffectiveProxy(t.opts); IsHTTPProxy(proxy) {
-			cmd.Env = EnvWithHTTPProxy(cmd.Env, proxy)
-		}
 		return t.launchLocked(cmd, nil, nil, w, stderr)
 	}
 
@@ -270,22 +322,90 @@ func (t *Transcoder) directURLsLocked() ([]string, error) {
 	return urls, nil
 }
 
-// PrefetchDirect 预解析直链并缓存，让投屏点击时就能发现解析失败，
-// 而不是等电视拉流时才转圈。失败时返回错误，由调用方展示给用户。
-// 管道模式不需要直链，直接返回 nil。
+// isPlaylistURL 报告直链是否为播放列表（m3u8 等）：这类地址指向的相对分片
+// 无法经 Go 中转（分片基准地址会错乱），必须由 ffmpeg 直连。
+func isPlaylistURL(u string) bool {
+	lower := strings.ToLower(u)
+	return strings.Contains(lower, ".m3u8")
+}
+
+// ensureDirectLocked 建好 Go 传输的本机服务，返回 ffmpeg 可用的输入地址与
+// 音频输入序号。fallback 为 true 时表示播放列表，调用方回退到 ffmpeg 直连。
+// 调用方须持有 t.mu（StreamTo/PrefetchDirect 持锁调用）。
+func (t *Transcoder) ensureDirectLocked() (inputs []string, audioIdx int, fallback bool, err error) {
+	urls, err := t.directURLsLocked()
+	if err != nil {
+		return nil, 0, false, err
+	}
+	for _, u := range urls {
+		if isPlaylistURL(u) {
+			return nil, len(urls) - 1, true, nil
+		}
+	}
+	if t.directSrv != nil && len(t.directUps) == len(urls) {
+		return t.directInputsLocked(), len(urls) - 1, false, nil
+	}
+	// 直链变化或首次建：重建上游与服务。
+	t.closeDirectLocked()
+	ups := make([]*Upstream, 0, len(urls))
+	for _, u := range urls {
+		up, uerr := NewUpstream(u, t.opts)
+		if uerr != nil {
+			for _, created := range ups {
+				_ = created.Close()
+			}
+			return nil, 0, false, uerr
+		}
+		ups = append(ups, up)
+	}
+	ln, lerr := net.Listen("tcp", "127.0.0.1:0")
+	if lerr != nil {
+		for _, up := range ups {
+			_ = up.Close()
+		}
+		return nil, 0, false, fmt.Errorf("启动本机传输服务失败: %w", lerr)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/v", ups[0])
+	if len(ups) == 2 {
+		mux.Handle("/a", ups[1])
+	}
+	srv := &http.Server{Handler: mux}
+	t.directLn, t.directSrv, t.directUps = ln, srv, ups
+	t.directBase = "http://" + ln.Addr().String()
+	go func() { _ = srv.Serve(ln) }()
+	return t.directInputsLocked(), len(urls) - 1, false, nil
+}
+
+// directInputsLocked 返回本机服务的输入地址；调用方须持有 t.mu 且服务已建好。
+func (t *Transcoder) directInputsLocked() []string {
+	inputs := []string{t.directBase + "/v"}
+	if len(t.directUps) == 2 {
+		inputs = append(inputs, t.directBase+"/a")
+	}
+	return inputs
+}
+
+// PrefetchDirect 预热 Go 传输（直链 + 上游探测 + 本机服务），让投屏点击时
+// 就能发现解析/连通失败，而不是等电视拉流时才转圈。失败时返回错误，
+// 由调用方展示给用户。管道模式不需要直链，直接返回 nil。
 func (t *Transcoder) PrefetchDirect(ctx context.Context) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.srcURL == "" || t.pipe {
 		return nil
 	}
-	urls, err := DirectURLs(ctx, t.srcURL, t.opts)
-	if err != nil {
-		return err
+	// 构造时已带直链（ResolveDirect 附带）则只建传输；否则回退取一次。
+	if len(t.cachedURLs) == 0 {
+		urls, err := DirectURLs(ctx, t.srcURL, t.opts)
+		if err != nil {
+			return err
+		}
+		t.cachedURLs = urls
+		t.cachedAt = time.Now()
 	}
-	t.cachedURLs = urls
-	t.cachedAt = time.Now()
-	return nil
+	_, _, _, err := t.ensureDirectLocked()
+	return err
 }
 
 // outputArgs 构造输出直播流的 ffmpeg 参数。

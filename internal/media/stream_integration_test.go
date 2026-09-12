@@ -39,7 +39,7 @@ func TestURLStreamIntegration(t *testing.T) {
 	// 1) Resolve：元数据解析。
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	res, err := Resolve(ctx, base+"/sample.mp4", Options{ProxyMode: ProxyModeNone})
+	res, urls, err := ResolveDirect(ctx, base+"/sample.mp4", Options{ProxyMode: ProxyModeNone})
 	if err != nil {
 		t.Fatalf("Resolve 失败: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestURLStreamIntegration(t *testing.T) {
 	}
 	defer ss.Close()
 	id, err := ss.AddTranscodeURL(ctx, base+"/sample.mp4", res.Title, res.IsLive,
-		Options{ProxyMode: ProxyModeNone}, PlanForOnline(res.VideoCodec, res.AudioCodec, DeviceCapabilities{}), res.Extractor)
+		Options{ProxyMode: ProxyModeNone}, PlanForOnline(res.VideoCodec, res.AudioCodec, DeviceCapabilities{}), res.Extractor, urls)
 	if err != nil {
 		t.Fatalf("注册流会话（预取直链）失败: %v", err)
 	}

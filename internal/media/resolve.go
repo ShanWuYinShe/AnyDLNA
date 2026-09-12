@@ -57,6 +57,10 @@ func HasYtDlp() bool {
 // manual 模式显式指定代理；none 模式传空串强制直连（否则 yt-dlp 会自行读取
 // 环境变量与操作系统代理）；system 模式由应用自己读出系统代理后显式传入。
 // CookieFile（内置浏览器导出）优先于 CookieBrowser（读取本机浏览器）。
+//
+// fail-fast：慢代理下 yt-dlp 默认重试 10 次、单次 socket 等待 20 秒，
+// 一次解析能拖几分钟才报错（实测某 YouTube 视频 -J 耗时 68 秒以上）。
+// 这里收紧为 15 秒超时、3 次重试：真有问题早报错，而不是让电视一直转圈。
 func ytDlpCommonArgs(opts Options) []string {
 	var args []string
 	switch opts.ProxyMode {
@@ -72,7 +76,7 @@ func ytDlpCommonArgs(opts Options) []string {
 	} else if opts.CookieBrowser != "" {
 		args = append(args, "--cookies-from-browser", opts.CookieBrowser)
 	}
-	return args
+	return append(args, "--socket-timeout", "15", "--retries", "3")
 }
 
 // systemProxyArgs 返回 system 模式下应传给 yt-dlp 的代理参数。
@@ -114,19 +118,38 @@ func Resolve(ctx context.Context, url string, opts Options) (*Resolved, error) {
 		return nil, fmt.Errorf("解析视频失败（站点不支持、网络不可达或代理不可用）: %w", err)
 	}
 
-	var raw struct {
-		Title     string  `json:"title"`
-		Duration  float64 `json:"duration"`
-		IsLive    bool    `json:"is_live"`
-		Extractor string  `json:"extractor_key"`
-		Uploader  string  `json:"uploader"`
-		VCodec    string  `json:"vcodec"`
-		ACodec    string  `json:"acodec"`
+	resolved, _, err := parseResolveJSON(out)
+	if err != nil {
+		return nil, err
 	}
+	return resolved, nil
+}
+
+// resolveRaw 是 yt-dlp -J 输出中本应用关心的子集。
+// requested_formats 是格式选择式命中后的音视频分轨（含直链 url），
+// 有它就能一次调用同时拿到元数据与直链，省掉第二次 -g 调用
+// （慢代理下每次调用都可能是几十秒，两次串行就是失败翻倍）。
+type resolveRaw struct {
+	Title     string  `json:"title"`
+	Duration  float64 `json:"duration"`
+	IsLive    bool    `json:"is_live"`
+	Extractor string  `json:"extractor_key"`
+	Uploader  string  `json:"uploader"`
+	VCodec    string  `json:"vcodec"`
+	ACodec    string  `json:"acodec"`
+	Formats   []struct {
+		URL string `json:"url"`
+	} `json:"requested_formats"`
+}
+
+// parseResolveJSON 从 -J 输出解析元数据与直链（1 条一体流或 2 条分离音视频）。
+// 直链缺失或超过 2 条时返回空 urls，调用方回退到 DirectURLs 再取一次。
+func parseResolveJSON(out []byte) (*Resolved, []string, error) {
+	var raw resolveRaw
 	if err := json.Unmarshal(out, &raw); err != nil {
-		return nil, fmt.Errorf("解析 yt-dlp 输出失败: %w", err)
+		return nil, nil, fmt.Errorf("解析 yt-dlp 输出失败: %w", err)
 	}
-	return &Resolved{
+	resolved := &Resolved{
 		Title:       raw.Title,
 		DurationSec: raw.Duration,
 		IsLive:      raw.IsLive,
@@ -134,7 +157,41 @@ func Resolve(ctx context.Context, url string, opts Options) (*Resolved, error) {
 		Uploader:    raw.Uploader,
 		VideoCodec:  raw.VCodec,
 		AudioCodec:  raw.ACodec,
-	}, nil
+	}
+	var urls []string
+	for _, f := range raw.Formats {
+		if u := strings.TrimSpace(f.URL); strings.HasPrefix(u, "http") {
+			urls = append(urls, u)
+		}
+	}
+	if len(urls) == 0 || len(urls) > 2 {
+		urls = nil
+	}
+	return resolved, urls, nil
+}
+
+// ResolveDirect 一次 -J 调用同时返回元数据与直链。
+// 直链随 -J 附带返回（见 parseResolveJSON），不再单独调 -g，
+// 把慢代理下两次串行调用的耗时与失败率都砍掉一半。
+func ResolveDirect(ctx context.Context, url string, opts Options) (*Resolved, []string, error) {
+	if !HasYtDlp() {
+		return nil, nil, MissingToolError("yt-dlp")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+
+	args := append([]string{"-J", "--no-playlist", "--no-warnings", "-f", formatSelector}, ytDlpCommonArgs(opts)...)
+	cmd := toolCmdContext(ctx, "yt-dlp", append(args, url)...)
+	var stderr limitBuffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		if msg := ytDlpErrTail(stderr.String()); msg != "" {
+			return nil, nil, fmt.Errorf("解析视频失败: %s", msg)
+		}
+		return nil, nil, fmt.Errorf("解析视频失败（站点不支持、网络不可达或代理不可用）: %w", err)
+	}
+	return parseResolveJSON(out)
 }
 
 // ytDlpErrTail 提取 yt-dlp 报错的最后几行（错误摘要在末尾），最长 300 字符。

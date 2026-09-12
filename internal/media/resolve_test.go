@@ -214,11 +214,14 @@ func TestNeedsPipeMode(t *testing.T) {
 			t.Errorf("%q 不应走管道模式", ext)
 		}
 	}
-	if NewURLTranscoder("u", false, Options{}, Plan{}, "bilibili").pipe != true {
+	if NewURLTranscoder("u", false, Options{}, Plan{}, "bilibili", nil).pipe != true {
 		t.Error("bilibili 的 Transcoder 应为管道模式")
 	}
-	if NewURLTranscoder("u", false, Options{}, Plan{}, "youtube").pipe != false {
+	if NewURLTranscoder("u", false, Options{}, Plan{}, "youtube", nil).pipe != false {
 		t.Error("youtube 的 Transcoder 应为直链模式")
+	}
+	if tc := NewURLTranscoder("u", false, Options{}, Plan{}, "youtube", []string{"http://a/v", "http://a/au"}); len(tc.cachedURLs) != 2 {
+		t.Error("传入直链应预填缓存")
 	}
 }
 

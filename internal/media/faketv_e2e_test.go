@@ -56,12 +56,12 @@ func TestFakeTVE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ss.Close()
-	res, err := Resolve(ctx, srcURL, Options{ProxyMode: ProxyModeNone})
+	res, urls, err := ResolveDirect(ctx, srcURL, Options{ProxyMode: ProxyModeNone})
 	if err != nil {
 		t.Fatalf("Resolve 失败: %v", err)
 	}
 	id, err := ss.AddTranscodeURL(ctx, srcURL, res.Title, res.IsLive,
-		Options{ProxyMode: ProxyModeNone}, PlanForOnline(res.VideoCodec, res.AudioCodec, DeviceCapabilities{}), res.Extractor)
+		Options{ProxyMode: ProxyModeNone}, PlanForOnline(res.VideoCodec, res.AudioCodec, DeviceCapabilities{}), res.Extractor, urls)
 	if err != nil {
 		t.Fatalf("注册流会话失败: %v", err)
 	}
