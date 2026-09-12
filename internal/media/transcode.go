@@ -35,8 +35,10 @@ var pipeExtractors = map[string]bool{
 }
 
 // NeedsPipeMode 报告该站点是否必须走管道模式（见 pipeExtractors）。
+// 大小写不敏感：yt-dlp 的 extractor_key 大小写不稳定（实测 B 站返回
+// "BiliBili"、YouTube 返回 "Youtube"），精确匹配会漏路由。
 func NeedsPipeMode(extractor string) bool {
-	return pipeExtractors[extractor]
+	return pipeExtractors[strings.ToLower(extractor)]
 }
 
 // plan 决定输出方式：可直通的轨道用 -c copy 复制，避免不必要的重编码。

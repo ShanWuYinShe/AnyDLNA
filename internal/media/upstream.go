@@ -154,6 +154,7 @@ func NewUpstream(rawURL string, opts Options) (*Upstream, error) {
 		up.have = make([]bool, n)
 	}
 	up.fetch = map[int64]bool{}
+	Diagf("上游就绪 长度=%d Range=%v host=%.60s", up.size, up.ranged, up.url)
 	return up, nil
 }
 
@@ -419,6 +420,7 @@ func (up *Upstream) fetchChunk(idx int64) {
 	up.mu.Lock()
 	if up.fatal == nil {
 		up.fatal = fmt.Errorf("拉取上游分片 %d 失败（已重试）: %v", idx, lastErr)
+		Diagf("上游失败 host=%.60s err=%v", up.url, up.fatal)
 	}
 	up.mu.Unlock()
 }

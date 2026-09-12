@@ -62,7 +62,7 @@ wails build   # 产出 build/bin/AnyDLNA.app（macOS）
 
 ## 设置（代理与 Cookies）
 
-点击右上角「⚙ 设置」进入设置页。所有设置只作用于**在线视频的解析与拉流**；设备发现与投屏流始终走局域网直连，不受影响。设置持久化保存在系统用户配置目录下的 `AnyDLNA/config.json`（macOS：`~/Library/Application Support/AnyDLNA/`）。
+点击右上角「⚙ 设置」进入设置页。所有设置只作用于**在线视频的解析与拉流**；设备发现与投屏流始终走局域网直连，不受影响。设置持久化保存在系统用户配置目录下的 `AnyDLNA/config.json`（macOS：`~/Library/Application Support/AnyDLNA/`）。诊断日志在同目录的 `logs/anydlna.log`（解析耗时、直链条数、上游长度、投屏/跳转成败都在里面，出问题直接看它）。
 
 ### 网络代理
 

@@ -180,18 +180,26 @@ func ResolveDirect(ctx context.Context, url string, opts Options) (*Resolved, []
 	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
+	t0 := time.Now()
 	args := append([]string{"-J", "--no-playlist", "--no-warnings", "-f", formatSelector}, ytDlpCommonArgs(opts)...)
 	cmd := toolCmdContext(ctx, "yt-dlp", append(args, url)...)
 	var stderr limitBuffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
+		Diagf("解析失败 %.1fs url=%.80s err=%v 舍尾=%.200s", time.Since(t0).Seconds(), url, err, ytDlpErrTail(stderr.String()))
 		if msg := ytDlpErrTail(stderr.String()); msg != "" {
 			return nil, nil, fmt.Errorf("解析视频失败: %s", msg)
 		}
 		return nil, nil, fmt.Errorf("解析视频失败（站点不支持、网络不可达或代理不可用）: %w", err)
 	}
-	return parseResolveJSON(out)
+	resolved, urls, perr := parseResolveJSON(out)
+	if perr != nil {
+		Diagf("解析失败 %.1fs url=%.80s err=%v", time.Since(t0).Seconds(), url, perr)
+		return nil, nil, perr
+	}
+	Diagf("解析成功 %.1fs 站点=%s 直链=%d条 url=%.80s", time.Since(t0).Seconds(), resolved.Extractor, len(urls), url)
+	return resolved, urls, nil
 }
 
 // ytDlpErrTail 提取 yt-dlp 报错的最后几行（错误摘要在末尾），最长 300 字符。

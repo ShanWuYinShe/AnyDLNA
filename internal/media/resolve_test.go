@@ -206,10 +206,13 @@ func TestOutputArgsDualInput(t *testing.T) {
 // yt-dlp 的 Python 下载栈正常），这些站点只能由 yt-dlp 下载经管道喂给 ffmpeg；
 // 其余站点走直链模式（yt-dlp 只解析，ffmpeg 直连直链负责全部操作）。
 func TestNeedsPipeMode(t *testing.T) {
-	if !NeedsPipeMode("bilibili") {
-		t.Error("bilibili 应走管道模式")
+	// extractor_key 大小写不稳定（实测 "BiliBili"/"Youtube"），都应正确路由。
+	for _, ext := range []string{"bilibili", "BiliBili", "BILIBILI"} {
+		if !NeedsPipeMode(ext) {
+			t.Errorf("%q 应走管道模式", ext)
+		}
 	}
-	for _, ext := range []string{"youtube", "youtube_music", "generic", "", "twitter"} {
+	for _, ext := range []string{"youtube", "Youtube", "youtube_music", "generic", "", "twitter"} {
 		if NeedsPipeMode(ext) {
 			t.Errorf("%q 不应走管道模式", ext)
 		}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/url"
 	"strings"
 	"sync"
@@ -25,7 +24,7 @@ import (
 // 后果——例如在测试或任何非 Wails 环境下调用时，应用不应因此退出。
 // 生命周期钩子（startup/shutdown）里拿到的 ctx 是真实上下文，
 // 那两处仍用 runtime 日志以便进入 Wails 的应用日志。
-func (a *App) logf(format string, args ...any) { log.Printf(format, args...) }
+func (a *App) logf(format string, args ...any) { media.Diagf(format, args...) }
 
 // DeviceInfo 是展示给前端的设备条目。
 type DeviceInfo struct {
@@ -119,6 +118,14 @@ func (a *App) startup(ctx context.Context) {
 	a.mu.Lock()
 	a.cfg = media.LoadConfig()
 	a.mu.Unlock()
+
+	// 文件日志先行：GUI 的 stdout 用户看不见，之后所有 logf/标准 log
+	// 都落到数据目录的日志文件，出问题直接看文件。
+	if path, err := media.InitDiagLog(); err != nil {
+		runtime.LogWarningf(ctx, "诊断日志初始化失败（仅影响落盘）: %v", err)
+	} else {
+		runtime.LogInfof(ctx, "诊断日志: %s", path)
+	}
 
 	// 启动自检：记录外部工具的实际解析结果。GUI 应用不继承 shell 的 PATH，
 	// 工具「装了却找不到」是最容易误判的一类问题，这里留下可核对的依据。
@@ -561,11 +568,15 @@ func (a *App) CastURL(udn, rawURL string) (*CastStatus, error) {
 	// http/https 与 socks5 都支持（见 newProxyHTTPClient）。
 	resolved, urls, err := media.ResolveDirect(ctx, rawURL, opts)
 	if err != nil {
+		media.Diagf("投屏失败 解析 url=%.80s err=%v", rawURL, err)
 		return nil, err
 	}
+	media.Diagf("投屏解析 url=%.80s 标题=%.40s 时长=%.0fs 直播=%v 站点=%s 直链=%d条",
+		rawURL, resolved.Title, resolved.DurationSec, resolved.IsLive, resolved.Extractor, len(urls))
 	plan := media.PlanForOnline(resolved.VideoCodec, resolved.AudioCodec, caps)
 	sessionID, err := srv.AddTranscodeURL(ctx, rawURL, resolved.Title, resolved.IsLive, opts, plan, resolved.Extractor, urls)
 	if err != nil {
+		media.Diagf("投屏失败 预热 会话=%s err=%v", sessionID, err)
 		return nil, err
 	}
 	ip, err := netutil.LANIP()
@@ -574,7 +585,13 @@ func (a *App) CastURL(udn, rawURL string) (*CastStatus, error) {
 		return nil, fmt.Errorf("获取本机局域网地址失败: %w", err)
 	}
 	playURL := srv.URL(ip, sessionID, false)
-	return a.startCast(dev, srv, sessionID, resolved.Title, playURL, plan.OutputMIME(), string(plan.Mode), ctx)
+	status, err := a.startCast(dev, srv, sessionID, resolved.Title, playURL, plan.OutputMIME(), string(plan.Mode), ctx)
+	if err != nil {
+		media.Diagf("投屏失败 下发 设备=%s err=%v", dev.FriendlyName, err)
+		return nil, err
+	}
+	media.Diagf("投屏成功 设备=%s 标题=%.40s 模式=%s", dev.FriendlyName, resolved.Title, string(plan.Mode))
+	return status, nil
 }
 
 // findDeviceLocked 按 UDN 在最近一次搜索结果中查找设备；调用方须持有 a.mu。
@@ -708,9 +725,15 @@ func (a *App) SeekTo(sec float64) error {
 	}
 	metadata := dlna.BuildDIDLMetadata(castFile, playURL, "video/mp2t")
 	if err := renderer.SetAVTransportURI(ctx, playURL, metadata); err != nil {
+		media.Diagf("跳转失败 下发 %.1fs err=%v", sec, err)
 		return fmt.Errorf("重新下发播放地址失败: %w", err)
 	}
-	return renderer.Play(ctx)
+	if err := renderer.Play(ctx); err != nil {
+		media.Diagf("跳转失败 播放 %.1fs err=%v", sec, err)
+		return err
+	}
+	media.Diagf("跳转成功 %.1fs 文件=%.40s", sec, castFile)
+	return nil
 }
 
 // rebuildURL 重建当前会话的拉流 URL，附加 t 参数促使电视端视作新资源。
@@ -783,6 +806,15 @@ func (a *App) GetCastStatus() *CastStatus {
 }
 
 // ---------- 设置：代理与 Cookies ----------
+
+// DiagLogPath 返回诊断日志文件路径（出问题把这个文件发来分析）。
+func (a *App) DiagLogPath() string {
+	path, err := media.DiagLogPath()
+	if err != nil {
+		return ""
+	}
+	return path
+}
 
 // GetConfig 返回当前设置。
 func (a *App) GetConfig() *media.Config {
