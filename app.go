@@ -88,14 +88,16 @@ type Position struct {
 // 锁纪律（避免再次出现「点了没反应」的死锁）：
 //   - a.mu 只保护内存状态的读写，临界区内绝不做网络、进程或等待用户的操作；
 //   - a.castMu 串行化投屏相关操作（投屏/停止/跳转），耗时 I/O 在持有
-//     castMu 但不持有 a.mu 的情况下执行。
+//     castMu 但不持有 a.mu 的情况下执行；
+//   - a.searchMu 串行化主动搜索，避免定时搜索与手动搜索同时占用网络。
 type App struct {
 	ctx           context.Context
 	streamSrv     *media.StreamServer
 	watcherCancel context.CancelFunc
 	browserMgr    *browser.Manager
 
-	castMu sync.Mutex // 串行化投屏操作，长耗时步骤不持有 a.mu
+	castMu   sync.Mutex // 串行化投屏操作，长耗时步骤不持有 a.mu
+	searchMu sync.Mutex // 串行化主动搜索，长耗时步骤不持有 a.mu
 
 	mu        sync.Mutex
 	cfg       media.Config   // 在线视频代理与 Cookies 配置
@@ -131,19 +133,17 @@ func (a *App) startup(ctx context.Context) {
 
 	watchCtx, cancel := context.WithCancel(context.Background())
 	a.watcherCancel = cancel
+
+	// 被动监听：设备主动广播 SSDP alive 时立刻出现。
 	if err := dlna.WatchRenderers(watchCtx, func(dev *dlna.Device) {
-		a.mu.Lock()
-		isNew := !a.hasDeviceLocked(dev.UDN)
-		if isNew {
-			a.devices = append(a.devices, dev)
-		}
-		a.mu.Unlock()
-		if isNew {
-			runtime.EventsEmit(a.ctx, "device:discovered", deviceInfoOf(dev))
-		}
+		a.mergeDevices([]*dlna.Device{dev}, true)
 	}); err != nil {
-		runtime.LogWarningf(ctx, "设备广播监听未启动（不影响手动搜索）: %v", err)
+		runtime.LogWarningf(ctx, "设备广播监听未启动（不影响定时与手动搜索）: %v", err)
 	}
+
+	// 定时主动搜索：不少电视（含实测的目标设备）平时不广播、只应答搜索，
+	// 仅靠被动监听无法在设备开机后自动发现，因此需要周期性主动搜索兜底。
+	go a.watchDevices(watchCtx)
 }
 
 // shutdown 在应用退出时清理流服务、监听、浏览器与转码进程。
@@ -186,16 +186,91 @@ func searchBudget(timeoutMS int) time.Duration {
 	return time.Duration(timeoutMS)*time.Millisecond + describeBudget
 }
 
-// SearchDevices 主动搜索局域网内的 DLNA 渲染设备，并合并常驻监听已发现的设备。
+// deviceSearchInterval 是后台定时主动搜索的间隔。
+//
+// 被动监听只能等到设备广播 SSDP alive，而不少电视（含本项目实测的目标设备）
+// 平时不广播、只应答搜索；没有定时搜索时，设备开机后不会自动出现，
+// 用户会以为「搜不到设备」。30 秒是兼顾「开机后能较快出现」与
+// 「不频繁占用组播」的取值。
+const deviceSearchInterval = 30 * time.Second
+
+// defaultSearchTimeoutMS 是主动搜索的默认窗口，定时与手动搜索共用。
+//
+// 不为此单独缩短定时搜索的窗口：搜索期间只有最初会发包，其余时间都在等待应答，
+// 而 M-SEARCH 声明的 MX 为 3 秒、设备可延迟到此时限才回复，
+// 窗口短于 MX 会漏掉守规矩但回复慢的设备。
+const defaultSearchTimeoutMS = 6000
+
+// discoverDevices 执行一次主动搜索。
+//
+// 用 a.searchMu 串行化：定时搜索与手动搜索若并发，会重复发送组播并重复抓取
+// 设备描述。这里刻意让后来者等待，从而复用同一次网络动作的结果。
+// 注意 searchMu 与 a.mu 不嵌套持有，且整个搜索期间都不持有 a.mu。
+func (a *App) discoverDevices(ctx context.Context, window time.Duration) ([]*dlna.Device, error) {
+	a.searchMu.Lock()
+	defer a.searchMu.Unlock()
+
+	// ctx 的截止时间必须比搜索窗口宽裕，否则随后的描述抓取会立即失败。
+	dctx, cancel := context.WithTimeout(ctx, window+describeBudget)
+	defer cancel()
+	return dlna.DiscoverRenderers(dctx, window)
+}
+
+// mergeDevices 把设备并入列表并按 UDN 去重，返回合并后的完整列表。
+//
+// notify 为真时，对本次新增的设备推送 device:discovered 事件。
+// 已存在的设备不会重复推送，因此定时搜索不会反复弹出「发现新设备」。
+func (a *App) mergeDevices(devs []*dlna.Device, notify bool) []*dlna.Device {
+	var added []*dlna.Device
+
+	a.mu.Lock()
+	for _, d := range devs {
+		if d == nil || a.hasDeviceLocked(d.UDN) {
+			continue
+		}
+		a.devices = append(a.devices, d)
+		added = append(added, d)
+	}
+	merged := append([]*dlna.Device(nil), a.devices...)
+	a.mu.Unlock()
+
+	// a.ctx 为 nil 时说明不在 Wails 生命周期内（例如单元测试），此时不推送事件。
+	if notify && a.ctx != nil {
+		for _, d := range added {
+			a.logf("自动发现设备: %s (%s) @ %s", d.FriendlyName, d.UDN, d.Location)
+			runtime.EventsEmit(a.ctx, "device:discovered", deviceInfoOf(d))
+		}
+	}
+	return merged
+}
+
+// watchDevices 周期性主动搜索设备，直到 ctx 结束。
+// 与被动监听互补，保证不应答广播、只应答搜索的设备也能自动出现。
+func (a *App) watchDevices(ctx context.Context) {
+	ticker := time.NewTicker(deviceSearchInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			window := time.Duration(defaultSearchTimeoutMS) * time.Millisecond
+			devs, err := a.discoverDevices(ctx, window)
+			if err != nil {
+				a.logf("定时搜索设备失败: %v", err)
+				continue
+			}
+			a.mergeDevices(devs, true)
+		}
+	}
+}
+
+// SearchDevices 主动搜索局域网内的 DLNA 渲染设备，并合并已发现的设备。
 func (a *App) SearchDevices(timeoutMS int) ([]DeviceInfo, error) {
 	if timeoutMS <= 0 || timeoutMS > 15000 {
-		timeoutMS = 6000
+		timeoutMS = defaultSearchTimeoutMS
 	}
-	searchWindow := time.Duration(timeoutMS) * time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), searchBudget(timeoutMS))
-	defer cancel()
-
-	devices, err := dlna.DiscoverRenderers(ctx, searchWindow)
+	devices, err := a.discoverDevices(context.Background(), time.Duration(timeoutMS)*time.Millisecond)
 	if err != nil {
 		return nil, fmt.Errorf("搜索设备失败: %w", err)
 	}
@@ -206,23 +281,8 @@ func (a *App) SearchDevices(timeoutMS int) ([]DeviceInfo, error) {
 	}
 	a.logf("搜索设备完成：发现 %d 台", len(devices))
 
-	a.mu.Lock()
-	merged := make([]*dlna.Device, 0, len(devices)+len(a.devices))
-	seen := map[string]bool{}
-	for _, d := range devices {
-		if !seen[d.UDN] {
-			seen[d.UDN] = true
-			merged = append(merged, d)
-		}
-	}
-	for _, d := range a.devices {
-		if !seen[d.UDN] {
-			seen[d.UDN] = true
-			merged = append(merged, d)
-		}
-	}
-	a.devices = merged
-	a.mu.Unlock()
+	// 手动搜索不推送事件：调用方直接拿到完整列表并自行渲染。
+	merged := a.mergeDevices(devices, false)
 
 	out := make([]DeviceInfo, 0, len(merged))
 	for _, d := range merged {

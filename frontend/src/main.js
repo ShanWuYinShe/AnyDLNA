@@ -60,7 +60,7 @@ function updateDeviceHint() {
     const total = $('deviceList').querySelectorAll('.device').length;
     $('deviceHint').textContent = total
         ? `列表中共 ${total} 台设备，点击选择`
-        : '未发现设备：应用会持续监听电视广播，设备上线后会自动出现在列表；也可在下方输入电视 IP 手动添加';
+        : '未发现设备：应用会持续监听并定时搜索，设备上线后会自动出现在列表；也可点「搜索设备」或输入电视 IP 手动添加';
 }
 
 // addDeviceItem 把一台设备渲染进列表并绑定选中事件；同一设备（UDN）不重复添加。

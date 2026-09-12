@@ -282,3 +282,73 @@ func TestSearchBudgetExceedsSearchWindow(t *testing.T) {
 		}
 	}
 }
+
+// TestMergeDevicesDedupesByUDN 回归测试：设备合并必须按 UDN 去重，
+// 且不丢弃此前已发现的设备——设备上线/离线是常态，列表只能是并集。
+func TestMergeDevicesDedupesByUDN(t *testing.T) {
+	a := NewApp()
+	d := func(udn, name string) *dlna.Device {
+		return &dlna.Device{UDN: udn, FriendlyName: name, Location: "http://" + udn + "/d.xml"}
+	}
+
+	got := a.mergeDevices([]*dlna.Device{d("A", "电视A"), d("B", "盒子B")}, false)
+	if len(got) != 2 {
+		t.Fatalf("首次合并应有 2 台，实际 %d", len(got))
+	}
+
+	// 第二次只返回 B、C：A 必须保留，C 追加，B 不重复。
+	got = a.mergeDevices([]*dlna.Device{d("B", "盒子B"), d("C", "电视C")}, false)
+	if len(got) != 3 {
+		t.Fatalf("合并后应有 3 台（A/B/C），实际 %d: %+v", len(got), udnsOf(got))
+	}
+	if want := []string{"A", "B", "C"}; !equalStrings(udnsOf(got), want) {
+		t.Errorf("合并结果应为 %v，实际 %v", want, udnsOf(got))
+	}
+
+	// 重复 UDN 不应产生重复条目。
+	got = a.mergeDevices([]*dlna.Device{d("A", "电视A"), d("A", "电视A")}, false)
+	if len(got) != 3 {
+		t.Errorf("重复 UDN 应去重，实际 %d: %v", len(got), udnsOf(got))
+	}
+
+	// nil 元素应被忽略，不应导致 panic 或占位。
+	got = a.mergeDevices([]*dlna.Device{nil, d("D", "电视D")}, false)
+	if len(got) != 4 {
+		t.Errorf("应忽略 nil 并追加 D，实际 %d: %v", len(got), udnsOf(got))
+	}
+}
+
+// TestMergeDevicesNotifyOnlyForNew 确认事件只对新增设备推送一次，
+// 否则定时搜索会反复弹出「发现新设备」。
+func TestMergeDevicesNotifyOnlyForNew(t *testing.T) {
+	// a.ctx 为 nil（非 Wails 生命周期）时不应 panic，仅跳过事件推送。
+	a := NewApp()
+	dev := &dlna.Device{UDN: "A", FriendlyName: "电视A", Location: "http://a/d.xml"}
+	a.mergeDevices([]*dlna.Device{dev}, true)
+	a.mergeDevices([]*dlna.Device{dev}, true)
+	if n := len(a.devices); n != 1 {
+		t.Errorf("重复推送后仍应只有 1 台，实际 %d", n)
+	}
+}
+
+// udnsOf 取出设备列表的 UDN 序列，便于断言。
+func udnsOf(devs []*dlna.Device) []string {
+	out := make([]string, 0, len(devs))
+	for _, d := range devs {
+		out = append(out, d.UDN)
+	}
+	return out
+}
+
+// equalStrings 比较两个字符串切片是否相等。
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
