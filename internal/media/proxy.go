@@ -42,6 +42,50 @@ func DetectSystemProxy() string {
 	return systemProxy()
 }
 
+// EffectiveProxy 返回给定配置下实际生效的代理地址：manual 用填写的地址，
+// system 用检测到的系统代理，none 返回空串。
+func EffectiveProxy(opts Options) string {
+	switch opts.ProxyMode {
+	case ProxyModeManual:
+		return strings.TrimSpace(opts.Proxy)
+	case ProxyModeSystem:
+		return strings.TrimSpace(DetectSystemProxy())
+	default:
+		return ""
+	}
+}
+
+// IsHTTPProxy 报告代理地址是否为 ffmpeg 可用的 http(s) 协议。
+// ffmpeg 只认 http(s) 代理、不支持 socks（直链拉流必须经它联网）。
+func IsHTTPProxy(proxy string) bool {
+	scheme := strings.ToLower(strings.TrimSpace(proxy))
+	return strings.HasPrefix(scheme, "http://") || strings.HasPrefix(scheme, "https://")
+}
+
+// EnvWithHTTPProxy 返回注入 HTTP 代理后的环境变量副本：覆盖大小写的
+// http_proxy/https_proxy（ffmpeg 只读它们），其余原样保留。
+// proxy 为空时原样返回。
+func EnvWithHTTPProxy(env []string, proxy string) []string {
+	if strings.TrimSpace(proxy) == "" {
+		return env
+	}
+	out := make([]string, 0, len(env)+2)
+	keys := map[string]bool{
+		"http_proxy": true, "https_proxy": true,
+		"HTTP_PROXY": true, "HTTPS_PROXY": true,
+	}
+	for _, kv := range env {
+		if k, _, found := strings.Cut(kv, "="); found && keys[k] {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out,
+		"http_proxy="+proxy,
+		"https_proxy="+proxy,
+	)
+}
+
 // proxyFromEnv 读取标准代理环境变量（大小写两种形式）。
 func proxyFromEnv() string {
 	for _, key := range []string{

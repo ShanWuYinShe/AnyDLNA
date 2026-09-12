@@ -559,8 +559,21 @@ func (a *App) CastURL(udn, rawURL string) (*CastStatus, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 直链模式下 ffmpeg 直连 CDN 拉流，它只认 http(s) 代理、不支持 socks：
+	// 生效代理是 socks 时，对必须经代理的站点（YouTube 等）直接报错，
+	// 引导用户在设置中改用手动 HTTP 代理，而不是让电视端一直转圈。
+	// 管道模式的站点（见 media.NeedsPipeMode）由 yt-dlp 下载、不受影响；
+	// 国内直连可达的站点 ffmpeg 直接连就行，也不受影响。
+	if !media.NeedsPipeMode(resolved.Extractor) {
+		if proxy := media.EffectiveProxy(opts); proxy != "" && !media.IsHTTPProxy(proxy) && needsProxy(resolved.Extractor) {
+			return nil, fmt.Errorf("当前代理 %s 为 SOCKS，ffmpeg 直连不支持；请在设置中改用手动 HTTP 代理后重试", proxy)
+		}
+	}
 	plan := media.PlanForOnline(resolved.VideoCodec, resolved.AudioCodec, caps)
-	sessionID := srv.AddTranscodeURL(rawURL, resolved.Title, resolved.IsLive, opts, plan)
+	sessionID, err := srv.AddTranscodeURL(ctx, rawURL, resolved.Title, resolved.IsLive, opts, plan, resolved.Extractor)
+	if err != nil {
+		return nil, err
+	}
 	ip, err := netutil.LANIP()
 	if err != nil {
 		srv.Remove(sessionID)
@@ -568,6 +581,18 @@ func (a *App) CastURL(udn, rawURL string) (*CastStatus, error) {
 	}
 	playURL := srv.URL(ip, sessionID, false)
 	return a.startCast(dev, srv, sessionID, resolved.Title, playURL, plan.OutputMIME(), string(plan.Mode), ctx)
+}
+
+// needsProxy 报告该站点的直链是否必须经代理才能从本机连通。
+// 目前只列出国内直连不可达的常见站点；不在表中的默认视为直连可达
+// （如 Bilibili），ffmpeg 直接连就行，不拦截 SOCKS 代理。
+func needsProxy(extractor string) bool {
+	switch extractor {
+	case "youtube", "youtube_music", "twitter", "instagram", "facebook", "twitch", "tiktok":
+		return true
+	default:
+		return false
+	}
 }
 
 // findDeviceLocked 按 UDN 在最近一次搜索结果中查找设备；调用方须持有 a.mu。

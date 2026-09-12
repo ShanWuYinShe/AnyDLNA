@@ -156,52 +156,33 @@ func ytDlpErrTail(stderr string) string {
 
 // streamConcurrentFragments 是下载 DASH/HLS 分片时的并发连接数。
 //
-// yt-dlp 默认一次只下一个分片，即整条流只占一条 TCP 连接。这对国内直连的
-// 站点无所谓，但在需要代理的站点（YouTube 等）上是致命瓶颈：单连接的吞吐
-// 由这条连接自身的延迟与丢包决定，而多路复用型代理（XHTTP、mux 等）单连接
-// 往往只有几十 KB/s——浏览器之所以快，正因为它对同一域名会同时开多条连接。
-//
-// 实测（VLESS + XHTTP 代理，同一 YouTube 视频，45 秒采样）：
-//   - 并发 1：仅下到 2.4 MB（104 KB/s，77 MB 预计 12 分钟）
-//   - 并发 8：81 MB 完整下载完成（峰值 835 KB/s，音频段 4–8 MB/s）
-//
-// 取 8 是兼顾提速与不给代理造成过多并发压力的折中。
+// 管道模式（见 Transcoder）下 yt-dlp 负责下载：默认一次只下一个分片，整条流
+// 只占一条 TCP 连接。对需要代理的站点（YouTube 等）这是致命瓶颈——多路复用型
+// 代理单连接往往只有几十 KB/s。并发 8 是兼顾提速与代理压力的折中。
 const streamConcurrentFragments = 8
 
 // streamDownloader 强制分片下载走 yt-dlp 原生下载器，而非拉起 ffmpeg 子进程。
 //
 // 默认的 ffmpeg 下载器是单连接顺序拉流，且它的代理只能从环境变量继承
-// --proxy 传不进去：终端里因 http_proxy 环境变量碰巧能用（但单连接仍慢），
-// 从 Finder/Dock 启动的 GUI 应用没有这些环境变量，ffmpeg 子进程便直连
-// 被墙站点，轻则几十 KB/s、重则直接退出（ffmpeg exited with code 196），
-// 电视端表现为“一直在下载中、网速几十 K、永远无法起播”。
-// native 下载器走 yt-dlp 自身的代理栈（--proxy 生效，支持 socks5）并配合
-// --concurrent-fragments 并发分片；ffmpeg 只做本地合并，不再碰网络。
-// 实测同一 YouTube 视频经 SOCKS+XHTTP 代理：ffmpeg 下载器 0 字节（直接失败），
-// native 下载器平均 6 MB/s。yt-dlp 会在 native 不支持时自动回退，无需担心兼容。
+// --proxy 传不进去：从 Finder/Dock 启动的 GUI 应用没有这些环境变量，
+// ffmpeg 子进程便直连被墙站点，轻则几十 KB/s、重则直接退出
+// （ffmpeg exited with code 196）。native 下载器走 yt-dlp 自身的代理栈
+// （--proxy 生效，支持 socks5）并配合 --concurrent-fragments 并发分片。
 const streamDownloader = "native"
 
-// videoOnlySelector / audioOnlySelector 是拉流时音视频分开取用的格式选择式，
+// videoOnlySelector / audioOnlySelector 是管道模式音视频分开取用的格式选择式，
 // 编码偏好与 formatSelector 一致（H.264 视频、AAC 音频优先）。
 //
 // 必须分开取：native 下载器在多路格式同时输出到同一 stdout 时会跳过合并、
 // 把音视频混写在一根管道里，下游无法解析出音频轨（电视有画面无声音）。
-// 分开后两路各走一根管道，由本机的 ffmpeg 按双输入合并（见 Transcoder）。
-// 音频同样优先小体积 AAC，理由见 formatSelector。
+// 分开后两路各走一根管道，由本机的 ffmpeg 按双输入合并。
+// 音频优先小体积 AAC，理由见 formatSelector。
 const videoOnlySelector = "bv*[vcodec^=avc1]/bv*"
 
 const audioOnlySelector = "ba[acodec^=mp4a][abr<=160]/ba[acodec^=mp4a]/ba"
 
-// ytDlpStreamArgs 构造把在线视频（已合并音视频）写到 stdout 的 yt-dlp 参数。
-// 与 Resolve 使用同一 formatSelector，保证解析阶段报告编码与实际拉流一致；
-// startSec>0 且非直播时用 --download-sections 实现快进到指定位置；
-// opts 语义见 ytDlpCommonArgs。
-func ytDlpStreamArgs(url string, startSec float64, isLive bool, opts Options) []string {
-	return ytDlpSingleStreamArgs(url, formatSelector, startSec, isLive, opts)
-}
-
 // ytDlpSingleStreamArgs 构造把单一格式（纯视频或纯音频）写到 stdout 的参数，
-// 供双管道拉流使用：视频路与音频路各起一个 yt-dlp 进程，互不干扰。
+// 供管道模式使用：视频路与音频路各起一个 yt-dlp 进程，互不干扰。
 func ytDlpSingleStreamArgs(url, selector string, startSec float64, isLive bool, opts Options) []string {
 	args := append([]string{
 		"-q", "--no-playlist", "--no-warnings",
@@ -213,4 +194,47 @@ func ytDlpSingleStreamArgs(url, selector string, startSec float64, isLive bool, 
 		args = append(args, "--download-sections", "*"+strconv.FormatFloat(startSec, 'f', 2, 64)+"-inf")
 	}
 	return append(args, "-o", "-", url)
+}
+
+// DirectURLs 用 yt-dlp 解析出音视频直链（-g，只取地址不下载）。
+// 与 Resolve 使用同一 formatSelector，保证报告的编码与实际拉流一致。
+// 返回 1 条 URL 表示一体流（progressive，音视频已合并），2 条为分离的
+// 视频与音频直链；其他情况返回错误。opts 语义见 ytDlpCommonArgs。
+func DirectURLs(ctx context.Context, url string, opts Options) ([]string, error) {
+	if !HasYtDlp() {
+		return nil, MissingToolError("yt-dlp")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	cmd := toolCmdContext(ctx, "yt-dlp", ytDlpDirectArgs(url, opts)...)
+	var stderr limitBuffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		if msg := ytDlpErrTail(stderr.String()); msg != "" {
+			return nil, fmt.Errorf("获取直链失败: %s", msg)
+		}
+		return nil, fmt.Errorf("获取直链失败（站点不支持、网络不可达或代理不可用）: %w", err)
+	}
+	var urls []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line = strings.TrimSpace(line); strings.HasPrefix(line, "http") {
+			urls = append(urls, line)
+		}
+	}
+	if len(urls) == 0 || len(urls) > 2 {
+		return nil, fmt.Errorf("获取直链失败（返回 %d 条地址）", len(urls))
+	}
+	return urls, nil
+}
+
+// ytDlpDirectArgs 构造取直链（-g）的 yt-dlp 参数：只取地址不下载。
+// 与 Resolve 使用同一 formatSelector，保证报告的编码与实际拉流一致。
+func ytDlpDirectArgs(url string, opts Options) []string {
+	args := append([]string{
+		"-g", "--no-playlist", "--no-warnings",
+		"-f", formatSelector,
+	}, ytDlpCommonArgs(opts)...)
+	return append(args, url)
 }

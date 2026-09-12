@@ -2,86 +2,45 @@ package media
 
 import (
 	"context"
-	"strconv"
 	"strings"
 	"testing"
 )
 
-func TestYtDlpStreamArgs(t *testing.T) {
-	// 普通视频：从 90 秒起播应带 --download-sections。
-	args := ytDlpStreamArgs("https://example.com/watch?v=abc", 90, false, Options{ProxyMode: ProxyModeNone})
+// TestYtDlpDirectArgs 校验取直链参数：只取地址不下载。
+//
+// 背景：在线投屏已改为 yt-dlp 只解析（-g）、ffmpeg 直连直链负责下载/定位/
+// 合并。取链参数必须与 Resolve 同一 formatSelector（编码一致），且不能带
+// 任何下载相关参数（-o、--downloader、--concurrent-fragments、
+// --download-sections 都会让 -g 变味或报错）。
+func TestYtDlpDirectArgs(t *testing.T) {
+	args := ytDlpDirectArgs("https://example.com/watch?v=abc", Options{ProxyMode: ProxyModeNone})
 	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, "--download-sections *90.00-inf") {
-		t.Errorf("缺少 download-sections 参数: %v", args)
+	if !strings.Contains(joined, "-g") {
+		t.Errorf("取直链必须带 -g: %v", args)
 	}
-	if !strings.Contains(joined, "-o - https://example.com/watch?v=abc") {
-		t.Errorf("缺少输出到 stdout 与目标 URL: %v", args)
+	if !strings.Contains(joined, "-f "+formatSelector) {
+		t.Errorf("取链应与解析用同一格式选择式: %v", args)
 	}
-
-	// 起点 0：不应携带 download-sections。
-	args = ytDlpStreamArgs("https://example.com/v", 0, false, Options{ProxyMode: ProxyModeNone})
-	if strings.Contains(strings.Join(args, " "), "download-sections") {
-		t.Errorf("起点为 0 不应有 download-sections: %v", args)
+	if !strings.Contains(joined, "--no-playlist") {
+		t.Errorf("缺少 --no-playlist: %v", args)
 	}
-
-	// 直播：不支持 download-sections。
-	args = ytDlpStreamArgs("https://example.com/live", 120, true, Options{ProxyMode: ProxyModeNone})
-	if strings.Contains(strings.Join(args, " "), "download-sections") {
-		t.Errorf("直播流不应有 download-sections: %v", args)
-	}
-
-	// 全部模式都必须输出到 stdout 且禁用播放列表展开。
-	for _, live := range []bool{false, true} {
-		args = ytDlpStreamArgs("u", 0, live, Options{ProxyMode: ProxyModeNone})
-		joined := strings.Join(args, " ")
-		if !strings.Contains(joined, "--no-playlist") || !strings.Contains(joined, "-o -") {
-			t.Errorf("缺少统一参数: %v", args)
+	for _, banned := range []string{"-o ", "--downloader", "--concurrent-fragments", "download-sections"} {
+		if strings.Contains(joined, banned) {
+			t.Errorf("取链不应带下载参数 %q: %v", banned, args)
 		}
+	}
+	if args[len(args)-1] != "https://example.com/watch?v=abc" {
+		t.Errorf("目标 URL 应为最后一个参数: %v", args)
 	}
 }
 
-// TestYtDlpStreamArgsUseConcurrentFragments 回归测试：拉流必须开启分片并发下载。
-//
-// 背景：yt-dlp 默认一次只下一个分片，整条流只占一条 TCP 连接。对需要代理的
-// 站点（YouTube 等）这是致命瓶颈——多路复用型代理单连接往往只有几十 KB/s。
-// 实测同一代理下并发 1 为 104 KB/s（77 MB 要 12 分钟），并发 8 在 45 秒内
-// 下完同一视频。该测试固定住「拉流必须带 --concurrent-fragments」这一约束，
-// 避免日后调整参数时把它丢掉，使投屏悄悄退回极慢的单连接下载。
-func TestYtDlpStreamArgsUseConcurrentFragments(t *testing.T) {
-	for _, live := range []bool{false, true} {
-		for _, start := range []float64{0, 90} {
-			args := ytDlpStreamArgs("https://example.com/v", start, live, Options{ProxyMode: ProxyModeNone})
-			joined := strings.Join(args, " ")
-			want := "--concurrent-fragments " + strconv.Itoa(streamConcurrentFragments)
-			if !strings.Contains(joined, want) {
-				t.Errorf("live=%v start=%v 缺少并发分片参数 %q: %v", live, start, want, args)
-			}
-		}
+// TestDirectURLsRequiresYtDlp 缺 yt-dlp 时取链应直接报错。
+func TestDirectURLsRequiresYtDlp(t *testing.T) {
+	if HasYtDlp() {
+		t.Skip("本机已安装 yt-dlp，跳过缺失场景")
 	}
-	if streamConcurrentFragments < 2 {
-		t.Errorf("并发数应大于 1 才有意义，当前 %d", streamConcurrentFragments)
-	}
-}
-
-// TestYtDlpStreamArgsUseNativeDownloader 回归测试：拉流必须用原生下载器。
-//
-// 背景：默认的 ffmpeg 下载器是单连接拉流，且它的代理只能从环境变量继承，
-// --proxy 传不进去。终端里因 http_proxy 碰巧能用，从 Finder/Dock 启动的
-// GUI 应用没有该环境变量，ffmpeg 子进程便直连被墙站点——轻则几十 KB/s、
-// 重则直接退出（ffmpeg exited with code 196），电视端永远无法起播。
-// native 下载器走 yt-dlp 自身代理栈（--proxy 生效）并支持分片并发，
-// 实测同一视频经 SOCKS+XHTTP 代理从 0 字节恢复到平均 6 MB/s。
-// 该测试固定住「拉流必须带 --downloader native」这一约束。
-func TestYtDlpStreamArgsUseNativeDownloader(t *testing.T) {
-	for _, live := range []bool{false, true} {
-		for _, start := range []float64{0, 90} {
-			args := ytDlpStreamArgs("https://example.com/v", start, live, Options{ProxyMode: ProxyModeNone})
-			joined := strings.Join(args, " ")
-			want := "--downloader " + streamDownloader
-			if !strings.Contains(joined, want) {
-				t.Errorf("live=%v start=%v 缺少原生下载器参数 %q: %v", live, start, want, args)
-			}
-		}
+	if _, err := DirectURLs(context.Background(), "https://example.com/v", Options{}); err == nil {
+		t.Fatal("yt-dlp 缺失时应返回错误")
 	}
 }
 
@@ -178,36 +137,54 @@ func TestTestProxyValidation(t *testing.T) {
 	}
 }
 
-// TestYtDlpSingleStreamSelectors 回归测试：双管道拉流必须音视频分开取。
+// TestEffectiveProxyAndIsHTTPProxy 校验生效代理读取与 http 判定。
 //
-// 背景：native 下载器在多路格式同时输出到同一 stdout 时会跳过合并、把音视频
-// 混写在一根管道里，下游解析不出音频轨（电视有画面无声音）；而分开取时每路
-// 都是干净的单流。视频路只取视频、音频路只取音频，且编码偏好与 formatSelector
-// 一致（H.264/AAC 优先，保证免转码直通）。
-func TestYtDlpSingleStreamSelectors(t *testing.T) {
-	vArgs := strings.Join(ytDlpSingleStreamArgs("u", videoOnlySelector, 0, false, Options{ProxyMode: ProxyModeNone}), " ")
-	if !strings.Contains(vArgs, "-f "+videoOnlySelector) {
-		t.Errorf("视频路应使用视频选择式: %s", vArgs)
+// 背景：直链模式下 ffmpeg 直连 CDN，必须走设置里的代理且只能是 http(s)
+// （ffmpeg 不支持 socks）。manual 用填的地址，system 用检测到的，
+// none 为空。
+func TestEffectiveProxyAndIsHTTPProxy(t *testing.T) {
+	if got := EffectiveProxy(Options{ProxyMode: ProxyModeManual, Proxy: " http://127.0.0.1:10809 "}); got != "http://127.0.0.1:10809" {
+		t.Errorf("manual 应返回去空格后的地址: %q", got)
 	}
-	if strings.Contains(vArgs, "+ba") || strings.Contains(vArgs, "/ba") {
-		t.Errorf("视频路不应包含音频格式: %s", vArgs)
+	if got := EffectiveProxy(Options{ProxyMode: ProxyModeNone}); got != "" {
+		t.Errorf("none 应返回空: %q", got)
 	}
-	aArgs := strings.Join(ytDlpSingleStreamArgs("u", audioOnlySelector, 0, false, Options{ProxyMode: ProxyModeNone}), " ")
-	if !strings.Contains(aArgs, "-f "+audioOnlySelector) {
-		t.Errorf("音频路应使用音频选择式: %s", aArgs)
+	t.Setenv("HTTPS_PROXY", "socks5://127.0.0.1:10808")
+	t.Setenv("https_proxy", "")
+	if got := EffectiveProxy(Options{ProxyMode: ProxyModeSystem}); got != "socks5://127.0.0.1:10808" {
+		t.Errorf("system 应返回检测到的代理: %q", got)
 	}
-	// 音频优先小体积 AAC（大体积音频在慢代理下跟不上视频会导致合并丢轨）。
-	if !strings.Contains(audioOnlySelector, "abr<=160") {
-		t.Errorf("音频选择式应优先小体积 AAC: %s", audioOnlySelector)
-	}
-	// 两路都要走原生下载器与分片并发（与合并链路同等提速）。
-	for name, joined := range map[string]string{"视频路": vArgs, "音频路": aArgs} {
-		if !strings.Contains(joined, "--downloader "+streamDownloader) {
-			t.Errorf("%s缺少原生下载器参数: %s", name, joined)
+	for _, tc := range []struct {
+		proxy string
+		want  bool
+	}{
+		{"http://127.0.0.1:10809", true},
+		{"https://proxy:8443", true},
+		{" HTTP://x ", true},
+		{"socks5://127.0.0.1:10808", false},
+		{"socks://127.0.0.1:10808", false},
+		{"", false},
+	} {
+		if got := IsHTTPProxy(tc.proxy); got != tc.want {
+			t.Errorf("IsHTTPProxy(%q) = %v, 期望 %v", tc.proxy, got, tc.want)
 		}
-		if !strings.Contains(joined, "--concurrent-fragments ") {
-			t.Errorf("%s缺少分片并发参数: %s", name, joined)
+	}
+}
+
+// TestEnvWithHTTPProxy 确认注入覆盖大小写代理变量、保留其余变量。
+func TestEnvWithHTTPProxy(t *testing.T) {
+	if got := EnvWithHTTPProxy([]string{"A=1"}, ""); len(got) != 1 || got[0] != "A=1" {
+		t.Errorf("空代理应原样返回: %v", got)
+	}
+	got := EnvWithHTTPProxy([]string{"A=1", "http_proxy=old", "HTTPS_PROXY=old"}, "http://127.0.0.1:10809")
+	joined := strings.Join(got, "\n")
+	for _, want := range []string{"A=1", "http_proxy=http://127.0.0.1:10809", "https_proxy=http://127.0.0.1:10809"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("缺少 %q: %v", want, got)
 		}
+	}
+	if strings.Contains(joined, "old") {
+		t.Errorf("旧代理值应被覆盖: %v", got)
 	}
 }
 
@@ -220,5 +197,46 @@ func TestOutputArgsDualInput(t *testing.T) {
 	single := strings.Join(outputArgs(Plan{Mode: OutputRemux, Container: ContainerMPEGTS, CopyVideo: true, CopyAudio: true}, 0), " ")
 	if !strings.Contains(single, "0:a:0?") || strings.Contains(single, "1:a:0?") {
 		t.Errorf("单输入音频仍应在第 0 路: %s", single)
+	}
+}
+
+// TestNeedsPipeMode 校验拉流模式路由：CDN 拒绝 ffmpeg 直连的站点走管道。
+//
+// 背景：B 站 mcdn 拒绝非浏览器 HTTP 客户端（ffmpeg/curl 返回 403 或拒绝连接，
+// yt-dlp 的 Python 下载栈正常），这些站点只能由 yt-dlp 下载经管道喂给 ffmpeg；
+// 其余站点走直链模式（yt-dlp 只解析，ffmpeg 直连直链负责全部操作）。
+func TestNeedsPipeMode(t *testing.T) {
+	if !NeedsPipeMode("bilibili") {
+		t.Error("bilibili 应走管道模式")
+	}
+	for _, ext := range []string{"youtube", "youtube_music", "generic", "", "twitter"} {
+		if NeedsPipeMode(ext) {
+			t.Errorf("%q 不应走管道模式", ext)
+		}
+	}
+	if NewURLTranscoder("u", false, Options{}, Plan{}, "bilibili").pipe != true {
+		t.Error("bilibili 的 Transcoder 应为管道模式")
+	}
+	if NewURLTranscoder("u", false, Options{}, Plan{}, "youtube").pipe != false {
+		t.Error("youtube 的 Transcoder 应为直链模式")
+	}
+}
+
+// TestYtDlpSingleStreamSelectors 回归测试：管道模式音视频分开取。
+//
+// 背景：native 下载器在多路格式同时输出到同一 stdout 时会跳过合并、把音视频
+// 混写在一根管道里，下游解析不出音频轨；分开取时每路都是干净的单流。
+func TestYtDlpSingleStreamSelectors(t *testing.T) {
+	vArgs := strings.Join(ytDlpSingleStreamArgs("u", videoOnlySelector, 0, false, Options{ProxyMode: ProxyModeNone}), " ")
+	if !strings.Contains(vArgs, "-f "+videoOnlySelector) {
+		t.Errorf("视频路应使用视频选择式: %s", vArgs)
+	}
+	aArgs := strings.Join(ytDlpSingleStreamArgs("u", audioOnlySelector, 0, false, Options{ProxyMode: ProxyModeNone}), " ")
+	if !strings.Contains(aArgs, "-f "+audioOnlySelector) {
+		t.Errorf("音频路应使用音频选择式: %s", aArgs)
+	}
+	// 音频优先小体积 AAC（大体积音频在慢代理下跟不上视频会导致合并丢轨）。
+	if !strings.Contains(audioOnlySelector, "abr<=160") {
+		t.Errorf("音频选择式应优先小体积 AAC: %s", audioOnlySelector)
 	}
 }

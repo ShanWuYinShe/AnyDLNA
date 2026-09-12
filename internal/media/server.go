@@ -1,6 +1,7 @@
 package media
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -87,13 +88,20 @@ func (s *StreamServer) AddTranscode(path, title string, plan Plan) string {
 	})
 }
 
-// AddTranscodeURL 注册在线视频流会话：yt-dlp 解析拉流，ffmpeg 按 plan 换封装或转码。
-// opts 决定 yt-dlp 的代理与 Cookies 行为，语义见 ytDlpCommonArgs。
-func (s *StreamServer) AddTranscodeURL(url, title string, isLive bool, opts Options, plan Plan) string {
+// AddTranscodeURL 注册在线视频流会话。直链模式（见 NeedsPipeMode 之外的站点）：
+// yt-dlp 只解析直链，ffmpeg 直连直链负责下载、定位与换封装/转码；注册时同步
+// 预解析一次直链，失败直接返回错误，让投屏点击时就能发现问题，而不是等电视
+// 拉流时才转圈。管道模式跳过预取（Resolve 阶段已验证过可达）。
+// opts 决定代理与 Cookies 行为，语义见 ytDlpCommonArgs。
+func (s *StreamServer) AddTranscodeURL(ctx context.Context, url, title string, isLive bool, opts Options, plan Plan, extractor string) (string, error) {
+	tc := NewURLTranscoder(url, isLive, opts, plan, extractor)
+	if err := tc.PrefetchDirect(ctx); err != nil {
+		return "", err
+	}
 	return s.add(&session{
 		id: newSessionID(), direct: false,
-		mime: plan.OutputMIME(), title: title, tc: NewURLTranscoder(url, isLive, opts, plan),
-	})
+		mime: plan.OutputMIME(), title: title, tc: tc,
+	}), nil
 }
 
 func (s *StreamServer) add(sess *session) string {
