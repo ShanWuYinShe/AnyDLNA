@@ -26,6 +26,10 @@ export function DeviceCapabilityInfo(arg1) {
   return window['go']['main']['App']['DeviceCapabilityInfo'](arg1);
 }
 
+export function DiagLogPath() {
+  return window['go']['main']['App']['DiagLogPath']();
+}
+
 export function GetCastStatus() {
   return window['go']['main']['App']['GetCastStatus']();
 }

@@ -15,6 +15,8 @@ export function CloseLoginBrowser():Promise<void>;
 
 export function DeviceCapabilityInfo(arg1:string):Promise<main.DeviceFormats>;
 
+export function DiagLogPath():Promise<string>;
+
 export function GetCastStatus():Promise<main.CastStatus>;
 
 export function GetConfig():Promise<media.Config>;
