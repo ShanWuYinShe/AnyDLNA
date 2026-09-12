@@ -367,3 +367,26 @@ func TestUpstreamSeekNotStarved(t *testing.T) {
 		t.Fatal("跳转内容不对")
 	}
 }
+
+// TestUpstreamStatRetry 探测遇瞬时拒绝时同 URL 重试恢复。
+func TestUpstreamStatRetry(t *testing.T) {
+	payload := make([]byte, 64*1024)
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls <= 2 {
+			http.Error(w, "slow down", http.StatusForbidden)
+			return
+		}
+		http.ServeContent(w, r, "v.mp4", time.Now(), bytes.NewReader(payload))
+	}))
+	defer srv.Close()
+	up, err := NewUpstream(srv.URL, Options{ProxyMode: ProxyModeNone})
+	if err != nil {
+		t.Fatalf("瞬时拒绝后应重试成功: %v", err)
+	}
+	defer up.Close()
+	if calls != 3 {
+		t.Fatalf("应探测 3 次，实际 %d 次", calls)
+	}
+}

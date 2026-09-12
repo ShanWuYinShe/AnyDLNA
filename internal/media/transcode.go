@@ -375,17 +375,29 @@ func (t *Transcoder) buildDirectLocked(urls []string) (inputs []string, audioIdx
 		return t.directInputsLocked(), len(urls) - 1, false, nil
 	}
 	// 直链变化或首次建：重建上游与服务。
+	// 多路探测并行（视频/音频各需 1 次 RTT 往返，串行直接翻倍）。
 	t.closeDirectLocked()
-	ups := make([]*Upstream, 0, len(urls))
-	for _, u := range urls {
-		up, uerr := NewUpstream(u, t.opts)
+	ups := make([]*Upstream, len(urls))
+	uerrs := make([]error, len(urls))
+	var wg sync.WaitGroup
+	for i, u := range urls {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			up, uerr := NewUpstream(u, t.opts)
+			ups[i], uerrs[i] = up, uerr
+		}()
+	}
+	wg.Wait()
+	for i, uerr := range uerrs {
 		if uerr != nil {
-			for _, created := range ups {
-				_ = created.Close()
+			for _, up := range ups {
+				if up != nil {
+					_ = up.Close()
+				}
 			}
-			return nil, 0, false, uerr
+			return nil, 0, false, fmt.Errorf("第%d路上游失败: %w", i, uerr)
 		}
-		ups = append(ups, up)
 	}
 	ln, lerr := net.Listen("tcp", "127.0.0.1:0")
 	if lerr != nil {
@@ -394,9 +406,10 @@ func (t *Transcoder) buildDirectLocked(urls []string) (inputs []string, audioIdx
 		}
 		return nil, 0, false, fmt.Errorf("启动本机传输服务失败: %w", lerr)
 	}
-	// 建好即预热头部：电视拉流（ffmpeg 读 moov）到来时直接命中缓存。
+	// 建好即预热头部 1MB（moov 索引区）：ffmpeg 首读命中缓存。
+	// 只 warm 1MB：限流中的上游经不起 8 并发齐射，温和一点。
 	for _, up := range ups {
-		up.WarmHead(2 * upstreamChunkSize)
+		up.WarmHead(upstreamChunkSize)
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/v", ups[0])

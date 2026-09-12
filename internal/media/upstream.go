@@ -140,9 +140,26 @@ func NewUpstream(rawURL string, opts Options) (*Upstream, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	up := &Upstream{url: rawURL, client: client, ctx: ctx, cancel: cancel}
 	up.cond = sync.NewCond(&up.mu)
-	if err := up.stat(); err != nil {
+	// 探测重试：googlevideo 会瞬时拒绝（403/超时），同一直链小退避重试，
+	// 恢复通常只要 1-2 秒；比直接换新直链（重新走一次 yt-dlp，十几秒）便宜得多。
+	var serr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				cancel()
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(attempt) * time.Second):
+			}
+		}
+		if serr = up.stat(); serr == nil {
+			break
+		}
+		Diagf("上游探测第%d次失败 host=%s err=%v", attempt+1, shortHost(rawURL), serr)
+	}
+	if serr != nil {
 		cancel()
-		return nil, err
+		return nil, serr
 	}
 	f, err := os.CreateTemp("", "anydlna-upstream-*")
 	if err != nil {
