@@ -11,6 +11,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"sync"
@@ -18,7 +20,8 @@ import (
 )
 
 // TV 是一台假电视：HTTP 服务承载设备描述与 SOAP 控制，UDP 承载 SSDP 应答，
-// Play 后在后台 GET 播放地址并消费流（模拟电视拉流）。
+// Play 后在后台 GET 播放地址并消费流（模拟电视拉流），可附带 ffplay 实时
+// 播放窗口与录制文件。
 type TV struct {
 	mu         sync.Mutex
 	listener   net.Listener
@@ -36,6 +39,33 @@ type TV struct {
 	cancelPlay context.CancelFunc
 	playStart  time.Time
 	duration   float64 // 上报的总时长（秒），GetPositionInfo 用
+
+	player    bool // 是否用 ffplay 实时播放收到的流
+	playerCmd *exec.Cmd
+	playerIn  io.WriteCloser
+
+	recordPath string
+	recordFile *os.File
+}
+
+// EnablePlayer 启用实时播放：Play 后把收到的流喂给 ffplay 弹窗播放
+// （有画面有声音，延迟数秒）。本机没有 ffplay 时返回错误。
+func (t *TV) EnablePlayer() error {
+	if _, err := exec.LookPath("ffplay"); err != nil {
+		return fmt.Errorf("未找到 ffplay（brew install ffmpeg）：%w", err)
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.player = true
+	return nil
+}
+
+// SetRecordPath 设置录制文件：Play 后收到的流同时写入该文件（调试用，
+// 可边录边用播放器打开看）。空串表示不录制。
+func (t *TV) SetRecordPath(path string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.recordPath = path
 }
 
 // New 启动一台假电视，监听 127.0.0.1 随机端口。
@@ -194,6 +224,7 @@ func (t *TV) serveControl(w http.ResponseWriter, r *http.Request) {
 }
 
 // startPlayback 后台 GET 播放地址并消费流，模拟电视拉流。
+// 启用了实时播放时同步喂给 ffplay 弹窗，设置了录制文件时同步写入。
 func (t *TV) startPlayback() {
 	t.stopPlayback()
 	t.mu.Lock()
@@ -202,7 +233,22 @@ func (t *TV) startPlayback() {
 	t.playStart = time.Now()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.cancelPlay = cancel
+	wantPlayer := t.player
+	recordPath := t.recordPath
+	// 每次播放起新的录制文件（跳转重播不与上一段混在一起）。
+	if recordPath != "" {
+		if t.recordFile != nil {
+			_ = t.recordFile.Close()
+			t.recordFile = nil
+		}
+		if f, err := os.Create(recordPath); err == nil {
+			t.recordFile = f
+		}
+	}
 	t.mu.Unlock()
+	if wantPlayer {
+		t.launchPlayer()
+	}
 	if uri == "" {
 		return
 	}
@@ -222,7 +268,8 @@ func (t *TV) startPlayback() {
 		for {
 			c, rerr := resp.Body.Read(tmp)
 			if c > 0 {
-				pending = append(pending, tmp[:c]...)
+				chunk := append([]byte(nil), tmp[:c]...)
+				pending = append(pending, chunk...)
 				var packets, errors int64
 				for len(pending) >= 188 {
 					if pending[0] == 0x47 {
@@ -236,7 +283,18 @@ func (t *TV) startPlayback() {
 				t.bytes += int64(c)
 				t.tsPackets += packets
 				t.tsErrors += errors
+				pw := t.playerIn
+				rf := t.recordFile
 				t.mu.Unlock()
+				// 阻塞写（播放器/磁盘）不能持锁，避免卡住 SOAP 控制。
+				if pw != nil {
+					if _, werr := pw.Write(chunk); werr != nil {
+						t.disablePlayer()
+					}
+				}
+				if rf != nil {
+					_, _ = rf.Write(chunk)
+				}
 			}
 			if rerr != nil {
 				return
@@ -245,13 +303,64 @@ func (t *TV) startPlayback() {
 	}()
 }
 
-// stopPlayback 停止后台拉流并置状态为 STOPPED。
+// launchPlayer 启动 ffplay 子进程，把收到的流喂给它的 stdin 实时播放。
+// 每次播放新起一个（跳转重播换新流），旧的在 stopPlayback 中已回收。
+func (t *TV) launchPlayer() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.killPlayerLocked()
+	cmd := exec.Command("ffplay", "-hide_banner", "-loglevel", "error",
+		"-window_title", "FakeTV", "-autoexit", "-i", "pipe:0")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return
+	}
+	// 播放窗口日志直接透出，方便看到解码报错。
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return
+	}
+	t.playerCmd = cmd
+	t.playerIn = stdin
+	go func() { _ = cmd.Wait() }()
+}
+
+// disablePlayer 播放器写入失败时（用户关了窗口）停喂但不断流。
+func (t *TV) disablePlayer() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.playerIn != nil {
+		_ = t.playerIn.Close()
+		t.playerIn = nil
+	}
+}
+
+// killPlayerLocked 回收播放器进程；调用方须持有 t.mu。
+func (t *TV) killPlayerLocked() {
+	if t.playerIn != nil {
+		_ = t.playerIn.Close()
+		t.playerIn = nil
+	}
+	if t.playerCmd != nil && t.playerCmd.Process != nil {
+		_ = t.playerCmd.Process.Kill()
+		_, _ = t.playerCmd.Process.Wait()
+		t.playerCmd = nil
+	}
+}
+
+// stopPlayback 停止后台拉流、播放器与录制，并置状态为 STOPPED。
 func (t *TV) stopPlayback() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.cancelPlay != nil {
 		t.cancelPlay()
 		t.cancelPlay = nil
+	}
+	t.killPlayerLocked()
+	if t.recordFile != nil {
+		_ = t.recordFile.Close()
+		t.recordFile = nil
 	}
 	t.state = "STOPPED"
 }
