@@ -268,7 +268,7 @@ func TestOutputArgs(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			args := outputArgs(c.plan)
+			args := outputArgs(c.plan, 0)
 			joined := joinArgs(args)
 			hasCopyV := containsSeq(args, "-c:v", "copy")
 			hasCopyA := containsSeq(args, "-c:a", "copy")

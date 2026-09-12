@@ -177,3 +177,48 @@ func TestTestProxyValidation(t *testing.T) {
 		t.Fatal("无效代理地址应返回错误")
 	}
 }
+
+// TestYtDlpSingleStreamSelectors 回归测试：双管道拉流必须音视频分开取。
+//
+// 背景：native 下载器在多路格式同时输出到同一 stdout 时会跳过合并、把音视频
+// 混写在一根管道里，下游解析不出音频轨（电视有画面无声音）；而分开取时每路
+// 都是干净的单流。视频路只取视频、音频路只取音频，且编码偏好与 formatSelector
+// 一致（H.264/AAC 优先，保证免转码直通）。
+func TestYtDlpSingleStreamSelectors(t *testing.T) {
+	vArgs := strings.Join(ytDlpSingleStreamArgs("u", videoOnlySelector, 0, false, Options{ProxyMode: ProxyModeNone}), " ")
+	if !strings.Contains(vArgs, "-f "+videoOnlySelector) {
+		t.Errorf("视频路应使用视频选择式: %s", vArgs)
+	}
+	if strings.Contains(vArgs, "+ba") || strings.Contains(vArgs, "/ba") {
+		t.Errorf("视频路不应包含音频格式: %s", vArgs)
+	}
+	aArgs := strings.Join(ytDlpSingleStreamArgs("u", audioOnlySelector, 0, false, Options{ProxyMode: ProxyModeNone}), " ")
+	if !strings.Contains(aArgs, "-f "+audioOnlySelector) {
+		t.Errorf("音频路应使用音频选择式: %s", aArgs)
+	}
+	// 音频优先小体积 AAC（大体积音频在慢代理下跟不上视频会导致合并丢轨）。
+	if !strings.Contains(audioOnlySelector, "abr<=160") {
+		t.Errorf("音频选择式应优先小体积 AAC: %s", audioOnlySelector)
+	}
+	// 两路都要走原生下载器与分片并发（与合并链路同等提速）。
+	for name, joined := range map[string]string{"视频路": vArgs, "音频路": aArgs} {
+		if !strings.Contains(joined, "--downloader "+streamDownloader) {
+			t.Errorf("%s缺少原生下载器参数: %s", name, joined)
+		}
+		if !strings.Contains(joined, "--concurrent-fragments ") {
+			t.Errorf("%s缺少分片并发参数: %s", name, joined)
+		}
+	}
+}
+
+// TestOutputArgsDualInput 校验双输入时音频映射指向第 1 路输入（pipe:3）。
+func TestOutputArgsDualInput(t *testing.T) {
+	joined := strings.Join(outputArgs(Plan{Mode: OutputRemux, Container: ContainerMPEGTS, CopyVideo: true, CopyAudio: true}, 1), " ")
+	if !strings.Contains(joined, "0:v:0") || !strings.Contains(joined, "1:a:0?") {
+		t.Errorf("双输入应映射 0:v:0 与 1:a:0?: %s", joined)
+	}
+	single := strings.Join(outputArgs(Plan{Mode: OutputRemux, Container: ContainerMPEGTS, CopyVideo: true, CopyAudio: true}, 0), " ")
+	if !strings.Contains(single, "0:a:0?") || strings.Contains(single, "1:a:0?") {
+		t.Errorf("单输入音频仍应在第 0 路: %s", single)
+	}
+}

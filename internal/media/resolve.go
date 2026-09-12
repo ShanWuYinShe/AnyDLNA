@@ -29,12 +29,21 @@ type Resolved struct {
 // 实时，是播放卡顿的主因。
 //
 // 逐级回退，保证任何站点都能选出可用的格式：
-//  1. H.264 视频 + AAC 音频：视频音频都可直通（最优）。
-//  2. H.264 视频 + 任意音频：视频直通，音频按需转码。
-//  3. 任意视频 + AAC 音频。
-//  4. 任意视频 + 任意音频：不得已时的完整转码。
-const formatSelector = "bv*[vcodec^=avc1]+ba[acodec^=mp4a]/" +
+//  1. H.264 视频 + 小体积 AAC 音频：视频音频都可直通（最优）。
+//  2. H.264 视频 + AAC 音频。
+//  3. H.264 视频 + 任意音频：视频直通，音频按需转码。
+//  4. 任意视频 + 小体积 AAC 音频。
+//  5. 任意视频 + AAC 音频。
+//  6. 任意视频 + 任意音频：不得已时的完整转码。
+//
+// 音频优先小体积（abr<=160，如 YouTube 的 140 约 10MB，而非 258 约 30MB）：
+// 在线拉流是边下边合边播，大体积音频在慢代理下跟不上视频，合并输出的音频轨
+// 损坏丢失（电视有画面无声音）；小体积 AAC 下载快、不断流，且 128k 在电视
+// 端听感无差。abr 缺失的站点会自动落到下一级兜底，不影响可用性。
+const formatSelector = "bv*[vcodec^=avc1]+ba[acodec^=mp4a][abr<=160]/" +
+	"bv*[vcodec^=avc1]+ba[acodec^=mp4a]/" +
 	"bv*[vcodec^=avc1]+ba/" +
+	"bv*+ba[acodec^=mp4a][abr<=160]/" +
 	"bv*+ba[acodec^=mp4a]/" +
 	"bv*+ba/b"
 
@@ -172,16 +181,33 @@ const streamConcurrentFragments = 8
 // native 下载器平均 6 MB/s。yt-dlp 会在 native 不支持时自动回退，无需担心兼容。
 const streamDownloader = "native"
 
+// videoOnlySelector / audioOnlySelector 是拉流时音视频分开取用的格式选择式，
+// 编码偏好与 formatSelector 一致（H.264 视频、AAC 音频优先）。
+//
+// 必须分开取：native 下载器在多路格式同时输出到同一 stdout 时会跳过合并、
+// 把音视频混写在一根管道里，下游无法解析出音频轨（电视有画面无声音）。
+// 分开后两路各走一根管道，由本机的 ffmpeg 按双输入合并（见 Transcoder）。
+// 音频同样优先小体积 AAC，理由见 formatSelector。
+const videoOnlySelector = "bv*[vcodec^=avc1]/bv*"
+
+const audioOnlySelector = "ba[acodec^=mp4a][abr<=160]/ba[acodec^=mp4a]/ba"
+
 // ytDlpStreamArgs 构造把在线视频（已合并音视频）写到 stdout 的 yt-dlp 参数。
 // 与 Resolve 使用同一 formatSelector，保证解析阶段报告编码与实际拉流一致；
 // startSec>0 且非直播时用 --download-sections 实现快进到指定位置；
 // opts 语义见 ytDlpCommonArgs。
 func ytDlpStreamArgs(url string, startSec float64, isLive bool, opts Options) []string {
+	return ytDlpSingleStreamArgs(url, formatSelector, startSec, isLive, opts)
+}
+
+// ytDlpSingleStreamArgs 构造把单一格式（纯视频或纯音频）写到 stdout 的参数，
+// 供双管道拉流使用：视频路与音频路各起一个 yt-dlp 进程，互不干扰。
+func ytDlpSingleStreamArgs(url, selector string, startSec float64, isLive bool, opts Options) []string {
 	args := append([]string{
 		"-q", "--no-playlist", "--no-warnings",
 		"--concurrent-fragments", strconv.Itoa(streamConcurrentFragments),
 		"--downloader", streamDownloader,
-		"-f", formatSelector,
+		"-f", selector,
 	}, ytDlpCommonArgs(opts)...)
 	if startSec > 0 && !isLive {
 		args = append(args, "--download-sections", "*"+strconv.FormatFloat(startSec, 'f', 2, 64)+"-inf")

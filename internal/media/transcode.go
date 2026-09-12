@@ -3,6 +3,7 @@ package media
 import (
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strconv"
 	"sync"
@@ -33,11 +34,14 @@ type Transcoder struct {
 }
 
 // stream 是一次拉流对应的进程组（ffmpeg + 可选的 yt-dlp）。
+// 在线源是双管道：视频路与音频路各一个 yt-dlp 进程，分别接到 ffmpeg 的
+// pipe:0 与 pipe:3，再由 ffmpeg 合并输出。
 type stream struct {
-	cmd    *exec.Cmd
-	srcCmd *exec.Cmd
-	done   chan struct{}
-	stderr *limitBuffer
+	cmd         *exec.Cmd
+	srcCmd      *exec.Cmd
+	srcAudioCmd *exec.Cmd
+	done        chan struct{}
+	stderr      *limitBuffer
 }
 
 // NewTranscoder 创建针对本地文件的转码器。
@@ -96,7 +100,9 @@ func (t *Transcoder) stopStreamLocked(s *stream) {
 	// yt-dlp 会自己拉起 ffmpeg 子进程下载 / 合并分片，必须整组终止：
 	// 只杀 yt-dlp 会让这些子进程变成孤儿（PPID=1）并继续占着 CDN 连接，
 	// 站点按 IP 限制并发连接，残留连接会让后续投屏被限速。
+	// 音频路同理，残留同样占连接。
 	killProcGroup(s.srcCmd)
+	killProcGroup(s.srcAudioCmd)
 	// s.done 由启动时的 goroutine 关闭，是唯一调用 cmd.Wait 的地方；
 	// srcCmd 没有后台 goroutine，直接 Wait 回收避免僵尸进程。
 	if s.done != nil {
@@ -107,6 +113,9 @@ func (t *Transcoder) stopStreamLocked(s *stream) {
 	}
 	if s.srcCmd != nil && s.srcCmd.Process != nil {
 		_, _ = s.srcCmd.Process.Wait()
+	}
+	if s.srcAudioCmd != nil && s.srcAudioCmd.Process != nil {
+		_, _ = s.srcAudioCmd.Process.Wait()
 	}
 	delete(t.streams, s)
 }
@@ -126,7 +135,6 @@ func (t *Transcoder) StreamTo(w io.Writer) (cancel func(), done <-chan struct{},
 	stderr := new(limitBuffer)
 	args := []string{"-hide_banner", "-loglevel", "error"}
 
-	var srcCmd *exec.Cmd
 	if t.srcURL == "" {
 		// 本地文件源：ffmpeg 直接读取，支持输入级快速定位。
 		if ssSec > 0 {
@@ -134,29 +142,55 @@ func (t *Transcoder) StreamTo(w io.Writer) (cancel func(), done <-chan struct{},
 		}
 		args = append(args, "-i", t.path)
 	} else {
-		// 在线源：seek 由 yt-dlp --download-sections 完成（管道不可 seek），
-		// ffmpeg 从 stdin 读取 yt-dlp 已合并的音视频流。
-		srcCmd = toolCmd("yt-dlp", ytDlpStreamArgs(t.srcURL, ssSec, t.isLive, t.opts)...)
-		srcCmd.Stderr = stderr
+		// 在线源：音视频分开取，各走一根管道，再由 ffmpeg 双输入合并。
+		// 不能合用一根管道：native 下载器在多路格式同时输出到同一 stdout
+		// 时会跳过合并、把音视频混写在一起，下游解析不出音频轨。
+		// seek 由两路各自的 --download-sections 完成（管道不可 seek）。
+		videoCmd := toolCmd("yt-dlp", ytDlpSingleStreamArgs(t.srcURL, videoOnlySelector, ssSec, t.isLive, t.opts)...)
+		videoCmd.Stderr = stderr
 		// 自成进程组：终止时才能连同 yt-dlp 拉起的 ffmpeg 子进程一起回收。
-		setProcGroup(srcCmd)
-		srcStdout, pipeErr := srcCmd.StdoutPipe()
+		setProcGroup(videoCmd)
+		videoOut, pipeErr := videoCmd.StdoutPipe()
 		if pipeErr != nil {
-			return func() {}, nil, fmt.Errorf("创建 yt-dlp 管道失败: %w", pipeErr)
+			return func() {}, nil, fmt.Errorf("创建视频管道失败: %w", pipeErr)
 		}
-		if startErr := srcCmd.Start(); startErr != nil {
-			return func() {}, nil, fmt.Errorf("启动 yt-dlp 失败: %w", startErr)
+		if startErr := videoCmd.Start(); startErr != nil {
+			return func() {}, nil, fmt.Errorf("启动视频拉流失败: %w", startErr)
 		}
-		args = append(args, "-i", "pipe:0")
-		cmd := toolCmd("ffmpeg", append(args, outputArgs(t.plan)...)...)
+		audioCmd := toolCmd("yt-dlp", ytDlpSingleStreamArgs(t.srcURL, audioOnlySelector, ssSec, t.isLive, t.opts)...)
+		audioCmd.Stderr = stderr
+		setProcGroup(audioCmd)
+		audioOut, pipeErr := audioCmd.StdoutPipe()
+		if pipeErr != nil {
+			killProcGroup(videoCmd)
+			_, _ = videoCmd.Process.Wait()
+			return func() {}, nil, fmt.Errorf("创建音频管道失败: %w", pipeErr)
+		}
+		if startErr := audioCmd.Start(); startErr != nil {
+			killProcGroup(videoCmd)
+			_, _ = videoCmd.Process.Wait()
+			return func() {}, nil, fmt.Errorf("启动音频拉流失败: %w", startErr)
+		}
+		args = append(args, "-i", "pipe:0", "-i", "pipe:3")
+		cmd := toolCmd("ffmpeg", append(args, outputArgs(t.plan, 1)...)...)
 		setProcGroup(cmd)
-		cmd.Stdin = srcStdout
-		return t.launchLocked(cmd, srcCmd, w, stderr)
+		cmd.Stdin = videoOut
+		// 音频管道以 fd 3 传给 ffmpeg（对应 pipe:3）。
+		if f, ok := audioOut.(*os.File); ok {
+			cmd.ExtraFiles = []*os.File{f}
+		} else {
+			killProcGroup(videoCmd)
+			_, _ = videoCmd.Process.Wait()
+			killProcGroup(audioCmd)
+			_, _ = audioCmd.Process.Wait()
+			return func() {}, nil, fmt.Errorf("音频管道不是文件句柄")
+		}
+		return t.launchLocked(cmd, videoCmd, audioCmd, w, stderr)
 	}
 
-	cmd := toolCmd("ffmpeg", append(args, outputArgs(t.plan)...)...)
+	cmd := toolCmd("ffmpeg", append(args, outputArgs(t.plan, 0)...)...)
 	setProcGroup(cmd)
-	return t.launchLocked(cmd, nil, w, stderr)
+	return t.launchLocked(cmd, nil, nil, w, stderr)
 }
 
 // outputArgs 构造输出直播流的 ffmpeg 参数。
@@ -165,8 +199,10 @@ func (t *Transcoder) StreamTo(w io.Writer) (cancel func(), done <-chan struct{},
 // 4K 约 1.4 倍实时），而视频轨道复制（-c copy）可达 18–29 倍实时且画质无损。
 // 因此只要源视频是设备可解码的编码（H.264），就一律复制直通；
 // 音频按 plan 决定，不兼容时才重编码为 AAC（开销相对视频可忽略）。
-func outputArgs(plan Plan) []string {
-	args := []string{"-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn"}
+// audioInput 是音频所在输入的序号：单输入（本地文件/旧链路）为 0，
+// 在线双管道拉流时视频在 pipe:0、音频在 pipe:3 对应的第 1 个输入。
+func outputArgs(plan Plan, audioInput int) []string {
+	args := []string{"-map", "0:v:0", "-map", strconv.Itoa(audioInput) + ":a:0?", "-sn", "-dn"}
 
 	if plan.CopyVideo {
 		args = append(args, "-c:v", "copy")
@@ -201,23 +237,26 @@ func containerArgs(container OutputContainer) []string {
 	return []string{"-f", "mpegts", "pipe:1"}
 }
 
-// launchLocked 启动 ffmpeg 并登记进程组；src 为其上游 yt-dlp 进程（可为 nil）。
+// launchLocked 启动 ffmpeg 并登记进程组；src 为视频路 yt-dlp 进程，
+// srcAudio 为音频路 yt-dlp 进程（本地文件源时均为 nil）。
 //
 // 每次调用产生独立的 stream，并把它记入 t.streams，使 Stop/RestartAt 能覆盖
 // 全部并发拉流。返回的 cancel 只作用于本次的进程组。
 // 调用方须持有 t.mu（StreamTo 持锁调用，launchLocked 内不得再加锁）。
-func (t *Transcoder) launchLocked(cmd, src *exec.Cmd, w io.Writer, stderr *limitBuffer) (func(), <-chan struct{}, error) {
+func (t *Transcoder) launchLocked(cmd, src, srcAudio *exec.Cmd, w io.Writer, stderr *limitBuffer) (func(), <-chan struct{}, error) {
 	cmd.Stdout = w
 	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
-		if src != nil && src.Process != nil {
-			_ = src.Process.Kill()
-			_, _ = src.Process.Wait()
+		for _, c := range []*exec.Cmd{src, srcAudio} {
+			if c != nil && c.Process != nil {
+				_ = c.Process.Kill()
+				_, _ = c.Process.Wait()
+			}
 		}
 		return func() {}, nil, fmt.Errorf("启动 ffmpeg 失败: %w", err)
 	}
 
-	s := &stream{cmd: cmd, srcCmd: src, stderr: stderr, done: make(chan struct{})}
+	s := &stream{cmd: cmd, srcCmd: src, srcAudioCmd: srcAudio, stderr: stderr, done: make(chan struct{})}
 	t.lastStderr = stderr
 	if t.streams == nil {
 		t.streams = map[*stream]struct{}{}
