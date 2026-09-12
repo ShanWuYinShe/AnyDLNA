@@ -363,7 +363,7 @@ func (a *App) Cast(udn, path string) (*CastStatus, error) {
 		info, probeErr := media.Probe(ctx, path)
 		cancel()
 		if probeErr != nil || !media.PlanForLocal(info, caps).IsDirect() {
-			return nil, errors.New("未安装 ffmpeg，只能直接播放设备可解码的原文件；请执行 brew install ffmpeg")
+			return nil, fmt.Errorf("%w；当前只能直接播放设备可解码的原文件", media.MissingToolError("ffmpeg"))
 		}
 	}
 
@@ -398,7 +398,7 @@ func (a *App) Cast(udn, path string) (*CastStatus, error) {
 // udn 为当前选中的设备，用于按其声明的能力给出真实方案（可为空）。
 func (a *App) ResolveURL(udn, rawURL string) (*ResolvedInfo, error) {
 	if !media.HasYtDlp() {
-		return nil, errors.New("未安装 yt-dlp，无法解析在线视频；请执行 brew install yt-dlp")
+		return nil, fmt.Errorf("%w；在线视频解析需要它", media.MissingToolError("yt-dlp"))
 	}
 	opts := a.resolveOptions()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -459,10 +459,10 @@ func (a *App) CastURL(udn, rawURL string) (*CastStatus, error) {
 		return nil, err
 	}
 	if !media.HasYtDlp() {
-		return nil, errors.New("未安装 yt-dlp，无法解析在线视频；请执行 brew install yt-dlp")
+		return nil, fmt.Errorf("%w；在线视频解析需要它", media.MissingToolError("yt-dlp"))
 	}
 	if !media.HasFFmpeg() {
-		return nil, errors.New("未安装 ffmpeg，无法转码在线视频；请执行 brew install ffmpeg")
+		return nil, fmt.Errorf("%w；在线视频无法免转码时需要用它在本地处理", media.MissingToolError("ffmpeg"))
 	}
 
 	caps := a.deviceCapabilities(dev)

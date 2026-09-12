@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -33,18 +32,18 @@ type Info struct {
 	FastStart bool `json:"fast_start"`
 }
 
-// HasFFmpeg 报告 ffmpeg/ffprobe 是否可用。
+// HasFFmpeg 报告 ffmpeg/ffprobe 是否可用（含常见安装目录，见 ResolveTool）。
 func HasFFmpeg() bool {
-	_, err := exec.LookPath("ffprobe")
-	return err == nil
+	_, ok := ResolveTool("ffprobe")
+	return ok
 }
 
 // Probe 用 ffprobe 探测媒体文件。
 func Probe(ctx context.Context, path string) (*Info, error) {
-	if _, err := exec.LookPath("ffprobe"); err != nil {
-		return nil, fmt.Errorf("未找到 ffprobe，请先安装 ffmpeg：brew install ffmpeg")
+	if !HasFFmpeg() {
+		return nil, MissingToolError("ffprobe")
 	}
-	cmd := exec.CommandContext(ctx, "ffprobe",
+	cmd := toolCmdContext(ctx, "ffprobe",
 		"-v", "error",
 		"-print_format", "json",
 		"-show_format", "-show_streams",

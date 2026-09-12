@@ -15,9 +15,25 @@
 ## 环境依赖
 
 - Go ≥ 1.25、[Wails CLI v2](https://wails.io/docs/gettingstarted/installation)（`go install github.com/wailsapp/wails/v2/cmd/wails@latest`）
-- `ffmpeg` / `ffprobe`（macOS：`brew install ffmpeg`）。未安装时仅支持直出格式，其余格式会提示安装。
+- `ffmpeg` / `ffprobe`（macOS：`brew install ffmpeg`）。未安装时仅支持直出格式，其余格式会提示。
 - `yt-dlp`（macOS：`brew install yt-dlp`）。在线视频投屏必需；建议定期升级（`brew upgrade yt-dlp`）以跟进各站点变化。
 - 若使用「用应用登录浏览器」，需要本机安装 Chrome / Edge / Brave 等 Chromium 系浏览器之一（应用会自动检测；可用 `ANYDLNA_BROWSER_PATH` 指定可执行文件路径）。
+
+### 为什么需要 yt-dlp，以及它如何被找到
+
+在线视频解析依赖 yt-dlp，而它**不是可以用 Go 平替的依赖**：yt-dlp 的价值在于内置约 1800 个站点解析器，并持续跟进各站点的反爬变化（YouTube 的签名解密、PO token、SABR 等）。Go 生态中的同类库覆盖面小得多（例如 `kkdai/youtube` 仅支持 YouTube，`iawia002/lux` 支持数十个站点），且需要自行跟进同样频繁的站点变更；[`lrstanley/go-ytdlp`](https://github.com/lrstanley/go-ytdlp) 则只是 yt-dlp 的 CLI 绑定，仍然需要该二进制。因此这里把 yt-dlp 当作外部解析引擎使用。
+
+工具的查找方式（`yt-dlp` / `ffmpeg` / `ffprobe` 一致）：
+
+1. 环境变量显式指定：`ANYDLNA_YTDLP_PATH` / `ANYDLNA_FFMPEG_PATH` / `ANYDLNA_FFPROBE_PATH`；
+2. 系统 `PATH`；
+3. 各平台常见安装目录——macOS 覆盖 Homebrew（`/opt/homebrew/bin`、`/usr/local/bin`）、MacPorts 与用户级目录，Linux 覆盖 `/usr/local/bin`、`/snap/bin`、Flatpak 与 `~/.local/bin`。
+
+第 3 步是必需的，而非锦上添花：**从 Finder / Dock 启动的 macOS 应用不继承 shell 的 PATH**（`launchctl` 默认也未设置），进程实际只有 `/usr/bin:/bin:/usr/sbin:/sbin`。只查 `PATH` 会让 Homebrew 安装的工具一律「未找到」——尽管它们在终端里完全可用。
+
+同样地，应用会把补齐后的 `PATH` 传给子进程：**yt-dlp 合并分离的音视频流时会自行调用 ffmpeg**，若子进程沿用精简 PATH，即使应用找到了 yt-dlp，它也会因找不到 ffmpeg 而失败。
+
+> 若提示「未找到某工具」，提示信息会列出已搜索的目录，并给出对应环境变量。请先确认不是路径问题，再考虑安装。
 
 ### 跨平台说明
 
@@ -123,8 +139,9 @@ main.go                  # Wails 入口
 app.go                   # 绑定给前端的业务层（搜索/选择/解析/投屏/控制/轮询/设置）
 internal/dlna/           # SSDP 发现、设备描述解析、AVTransport/RenderingControl SOAP 控制、
                          # ConnectionManager 格式协商（GetProtocolInfo 解析与 MIME 归一化）
-internal/media/          # ffprobe 探测（含 MP4 faststart 检测）、输出方式决策（直出/换封装/转码）、
-                         # yt-dlp 在线源解析、ffmpeg 实时处理、局域网 HTTP 流服务、
+internal/media/          # 外部工具定位（含 GUI PATH 兼容）、ffprobe 探测（含 MP4 faststart 检测）、
+                         # 输出方式决策（直出/换封装/转码）、yt-dlp 在线源解析、
+                         # ffmpeg 实时处理、局域网 HTTP 流服务、
                          # 配置持久化、代理探测（分平台）、Netscape Cookies 文件读写
 internal/browser/        # 纯 Go 的浏览器自动化（CDP）：启动独立 profile 的浏览器并读回 Cookies
 internal/netutil/        # 本机局域网地址探测

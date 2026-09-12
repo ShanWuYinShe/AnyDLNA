@@ -112,7 +112,7 @@ func (t *Transcoder) StreamTo(w io.Writer) (cancel func(), done <-chan struct{},
 	} else {
 		// 在线源：seek 由 yt-dlp --download-sections 完成（管道不可 seek），
 		// ffmpeg 从 stdin 读取 yt-dlp 已合并的音视频流。
-		srcCmd = exec.Command("yt-dlp", ytDlpStreamArgs(t.srcURL, ssSec, t.isLive, t.opts)...)
+		srcCmd = toolCmd("yt-dlp", ytDlpStreamArgs(t.srcURL, ssSec, t.isLive, t.opts)...)
 		srcCmd.Stderr = stderr
 		srcStdout, pipeErr := srcCmd.StdoutPipe()
 		if pipeErr != nil {
@@ -122,12 +122,12 @@ func (t *Transcoder) StreamTo(w io.Writer) (cancel func(), done <-chan struct{},
 			return func() {}, nil, fmt.Errorf("启动 yt-dlp 失败: %w", startErr)
 		}
 		args = append(args, "-i", "pipe:0")
-		cmd := exec.Command("ffmpeg", append(args, outputArgs(t.plan)...)...)
+		cmd := toolCmd("ffmpeg", append(args, outputArgs(t.plan)...)...)
 		cmd.Stdin = srcStdout
 		return t.launchLocked(cmd, srcCmd, w, stderr)
 	}
 
-	cmd := exec.Command("ffmpeg", append(args, outputArgs(t.plan)...)...)
+	cmd := toolCmd("ffmpeg", append(args, outputArgs(t.plan)...)...)
 	return t.launchLocked(cmd, nil, w, stderr)
 }
 

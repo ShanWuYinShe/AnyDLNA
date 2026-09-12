@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -39,10 +38,10 @@ const formatSelector = "bv*[vcodec^=avc1]+ba[acodec^=mp4a]/" +
 	"bv*+ba[acodec^=mp4a]/" +
 	"bv*+ba/b"
 
-// HasYtDlp 报告 yt-dlp 是否可用。
+// HasYtDlp 报告 yt-dlp 是否可用（含常见安装目录，见 ResolveTool）。
 func HasYtDlp() bool {
-	_, err := exec.LookPath("yt-dlp")
-	return err == nil
+	_, ok := ResolveTool("yt-dlp")
+	return ok
 }
 
 // ytDlpCommonArgs 构造代理与 Cookies 相关的公共参数。
@@ -69,14 +68,14 @@ func ytDlpCommonArgs(opts Options) []string {
 // 仅读取元数据（-J），不拉取媒体流；opts 语义见 ytDlpCommonArgs。
 // yt-dlp 的报错（如站点验证提示）会截取关键内容返回，便于前端直接展示。
 func Resolve(ctx context.Context, url string, opts Options) (*Resolved, error) {
-	if _, err := exec.LookPath("yt-dlp"); err != nil {
-		return nil, fmt.Errorf("未找到 yt-dlp，请先安装：brew install yt-dlp")
+	if !HasYtDlp() {
+		return nil, MissingToolError("yt-dlp")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
 	args := append([]string{"-J", "--no-playlist", "--no-warnings", "-f", formatSelector}, ytDlpCommonArgs(opts)...)
-	cmd := exec.CommandContext(ctx, "yt-dlp", append(args, url)...)
+	cmd := toolCmdContext(ctx, "yt-dlp", append(args, url)...)
 	var stderr limitBuffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
