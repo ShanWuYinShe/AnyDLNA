@@ -159,6 +159,19 @@ func ytDlpErrTail(stderr string) string {
 // 取 8 是兼顾提速与不给代理造成过多并发压力的折中。
 const streamConcurrentFragments = 8
 
+// streamDownloader 强制分片下载走 yt-dlp 原生下载器，而非拉起 ffmpeg 子进程。
+//
+// 默认的 ffmpeg 下载器是单连接顺序拉流，且它的代理只能从环境变量继承
+// --proxy 传不进去：终端里因 http_proxy 环境变量碰巧能用（但单连接仍慢），
+// 从 Finder/Dock 启动的 GUI 应用没有这些环境变量，ffmpeg 子进程便直连
+// 被墙站点，轻则几十 KB/s、重则直接退出（ffmpeg exited with code 196），
+// 电视端表现为“一直在下载中、网速几十 K、永远无法起播”。
+// native 下载器走 yt-dlp 自身的代理栈（--proxy 生效，支持 socks5）并配合
+// --concurrent-fragments 并发分片；ffmpeg 只做本地合并，不再碰网络。
+// 实测同一 YouTube 视频经 SOCKS+XHTTP 代理：ffmpeg 下载器 0 字节（直接失败），
+// native 下载器平均 6 MB/s。yt-dlp 会在 native 不支持时自动回退，无需担心兼容。
+const streamDownloader = "native"
+
 // ytDlpStreamArgs 构造把在线视频（已合并音视频）写到 stdout 的 yt-dlp 参数。
 // 与 Resolve 使用同一 formatSelector，保证解析阶段报告编码与实际拉流一致；
 // startSec>0 且非直播时用 --download-sections 实现快进到指定位置；
@@ -167,6 +180,7 @@ func ytDlpStreamArgs(url string, startSec float64, isLive bool, opts Options) []
 	args := append([]string{
 		"-q", "--no-playlist", "--no-warnings",
 		"--concurrent-fragments", strconv.Itoa(streamConcurrentFragments),
+		"--downloader", streamDownloader,
 		"-f", formatSelector,
 	}, ytDlpCommonArgs(opts)...)
 	if startSec > 0 && !isLive {

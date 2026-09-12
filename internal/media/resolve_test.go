@@ -63,6 +63,28 @@ func TestYtDlpStreamArgsUseConcurrentFragments(t *testing.T) {
 	}
 }
 
+// TestYtDlpStreamArgsUseNativeDownloader 回归测试：拉流必须用原生下载器。
+//
+// 背景：默认的 ffmpeg 下载器是单连接拉流，且它的代理只能从环境变量继承，
+// --proxy 传不进去。终端里因 http_proxy 碰巧能用，从 Finder/Dock 启动的
+// GUI 应用没有该环境变量，ffmpeg 子进程便直连被墙站点——轻则几十 KB/s、
+// 重则直接退出（ffmpeg exited with code 196），电视端永远无法起播。
+// native 下载器走 yt-dlp 自身代理栈（--proxy 生效）并支持分片并发，
+// 实测同一视频经 SOCKS+XHTTP 代理从 0 字节恢复到平均 6 MB/s。
+// 该测试固定住「拉流必须带 --downloader native」这一约束。
+func TestYtDlpStreamArgsUseNativeDownloader(t *testing.T) {
+	for _, live := range []bool{false, true} {
+		for _, start := range []float64{0, 90} {
+			args := ytDlpStreamArgs("https://example.com/v", start, live, Options{ProxyMode: ProxyModeNone})
+			joined := strings.Join(args, " ")
+			want := "--downloader " + streamDownloader
+			if !strings.Contains(joined, want) {
+				t.Errorf("live=%v start=%v 缺少原生下载器参数 %q: %v", live, start, want, args)
+			}
+		}
+	}
+}
+
 func TestYtDlpCommonArgs(t *testing.T) {
 	// system 模式：由应用读出系统代理后显式传入，而不交给 yt-dlp 自行探测。
 	// 这里借 HTTPS_PROXY 驱动 DetectSystemProxy，使断言不依赖本机设置。
