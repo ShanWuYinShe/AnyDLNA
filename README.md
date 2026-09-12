@@ -21,7 +21,7 @@
 
 ### 为什么需要 yt-dlp，以及它如何被找到
 
-在线视频解析依赖 yt-dlp，而它**不是可以用 Go 平替的依赖**：yt-dlp 的价值在于内置约 1800 个站点解析器，并持续跟进各站点的反爬变化（YouTube 的签名解密、PO token、SABR 等）。Go 生态中的同类库覆盖面小得多（例如 `kkdai/youtube` 仅支持 YouTube，`iawia002/lux` 支持数十个站点），且需要自行跟进同样频繁的站点变更；[`lrstanley/go-ytdlp`](https://github.com/lrstanley/go-ytdlp) 则只是 yt-dlp 的 CLI 绑定，仍然需要该二进制。因此这里把 yt-dlp 当作外部解析引擎使用。
+在线视频解析依赖 yt-dlp，而它**不是可以用 Go 平替的依赖**：yt-dlp 的价值在于内置 1700 多个站点解析器（官方支持列表当前共 1731 条），并持续跟进各站点的反爬变化（YouTube 的签名解密、PO token、SABR 等）。Go 生态中的同类库覆盖面小得多（例如 `kkdai/youtube` 仅支持 YouTube，`iawia002/lux` 支持约 46 个站点），且需要自行跟进同样频繁的站点变更；[`lrstanley/go-ytdlp`](https://github.com/lrstanley/go-ytdlp) 则只是 yt-dlp 的 CLI 绑定，仍然需要该二进制。因此这里把 yt-dlp 当作外部解析引擎使用。
 
 工具的查找方式（`yt-dlp` / `ffmpeg` / `ffprobe` 一致）：
 
