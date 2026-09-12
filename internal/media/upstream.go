@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,7 +24,7 @@ import (
 // 上游内容，存入本地稀疏缓存（临时文件 + 位图）；同时 Upstream 在本机回环
 // 起一个只供 ffmpeg 访问的 HTTP 服务，完整支持 Range。ffmpeg 用
 // `-ss 秒 -i http://127.0.0.1:端口/v` 定位时，自己发 Range 请求，
-// Upstream 按需优先拉取跳转位置（缓存命中则瞬间返回）， television 重拉即跳转。
+// Upstream 按需优先拉取跳转位置（缓存命中则瞬间返回），电视重拉即跳转。
 //
 // 为什么不用 ffmpeg 直连直链：ffmpeg 只认 http(s) 代理、不支持 socks5，
 // 且它的重试/超时不可控；Go 的 http.Client 两种代理都支持，超时、重试、
@@ -121,7 +122,7 @@ type Upstream struct {
 	have   []bool // 按 chunkSize 切分的位图（仅 Range 模式）
 	filled int64  // 非 Range 模式下已顺序填充的字节数
 	fetch  map[int64]bool
-	wants  []int64 // 最近被请求的位置，调度优先用
+	wants  map[int64]time.Time // 分片→最近请求时间，调度优先用
 	fatal  error
 	closed bool
 
@@ -170,7 +171,7 @@ func (up *Upstream) stat() error {
 	req.Header.Set("Range", "bytes=0-0")
 	resp, err := up.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("连接上游失败: %w", err)
+		return fmt.Errorf("连接上游 %s 失败: %w", shortHost(up.url), err)
 	}
 	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
 	switch resp.StatusCode {
@@ -187,8 +188,19 @@ func (up *Upstream) stat() error {
 		up.size = resp.ContentLength
 		return nil
 	default:
-		return fmt.Errorf("上游返回 %s", resp.Status)
+		return fmt.Errorf("上游 %s 返回 %s", shortHost(up.url), resp.Status)
 	}
+}
+
+// shortHost 截取 URL 的 host 部分用于报错（完整直链上千字符，不能进日志）。
+func shortHost(rawURL string) string {
+	if u, err := url.Parse(rawURL); err == nil && u.Host != "" {
+		return u.Host
+	}
+	if len(rawURL) > 60 {
+		return rawURL[:60]
+	}
+	return rawURL
 }
 
 // parseTotalFromContentRange 从 "bytes 0-0/12345" 解析出 12345。
@@ -211,12 +223,29 @@ func (up *Upstream) Size() int64 {
 	return up.size
 }
 
+// WarmHead 后台预取头部最多 n 字节（moov 索引区）：ffmpeg 起播/定位的
+// 第一次读取几乎总是头部，预热后首包等待只剩定位点的拉取。
+// 非阻塞，失败由后续正式读取的重试覆盖，不单独报错。
+func (up *Upstream) WarmHead(n int64) {
+	up.mu.Lock()
+	defer up.mu.Unlock()
+	if up.closed || up.fatal != nil {
+		return
+	}
+	for off := int64(0); off < n; off += upstreamChunkSize {
+		up.noteWantLocked(off)
+	}
+	up.kickWorkersLocked()
+}
+
 // ensureLocked 保证 [start, end) 可读，必要时拉起 worker 并阻塞等待。
 // 调用方须持有 up.mu；等待期间释放锁，靠 cond 唤醒。
 // ctx 用于客户端断开时提前返回。
 func (up *Upstream) ensureLocked(ctx context.Context, start, end int64) error {
-	up.noteWantLocked(start)
 	for {
+		// 每次循环都刷新需求（阻塞中的跳转等待者保持新鲜，不会被
+		// 顺序播放流的请求位置淹没，见 pickChunkLocked）。
+		up.noteWantLocked(start)
 		if up.fatal != nil {
 			return up.fatal
 		}
@@ -269,21 +298,32 @@ func (up *Upstream) ensureLocked(ctx context.Context, start, end int64) error {
 	}
 }
 
+// wantTTL 是需求位置的保鲜期：超过它未再被请求的区域视为读者已离开。
+const wantTTL = 20 * time.Second
+
 // noteWantLocked 记录请求位置供调度优先；调用方须持有 up.mu。
+// 按分片去重 + 保鲜：顺序播放流的高频请求只刷新自己所在分片，不会把
+// 跳转等待者的位置挤掉（旧实现是定长 8 的追加队列，跳转位置几秒就被淹没，
+// 跳转流永远等不到 worker，表现为跳转后长时间零字节）。
 func (up *Upstream) noteWantLocked(off int64) {
-	up.wants = append(up.wants, off)
-	if len(up.wants) > 8 {
-		up.wants = up.wants[len(up.wants)-8:]
+	if up.wants == nil {
+		up.wants = map[int64]time.Time{}
 	}
+	up.wants[off/upstreamChunkSize] = time.Now()
 }
 
 // kickWorkersLocked 按需拉起 worker 至上限；调用方须持有 up.mu。
+// 有未服务的远跳转需求时多允许一个 worker，避免跳转等满顺序预取。
 func (up *Upstream) kickWorkersLocked() {
 	active := 0
 	for range up.fetch {
 		active++
 	}
-	for active < upstreamWorkers {
+	limit := upstreamWorkers
+	if up.hasUnservedJumpLocked() {
+		limit++
+	}
+	for active < limit {
 		idx, ok := up.pickChunkLocked()
 		if !ok {
 			return
@@ -294,7 +334,38 @@ func (up *Upstream) kickWorkersLocked() {
 	}
 }
 
-// pickChunkLocked 选下一个要拉的分片：优先跳转位置附近，其次顺序预取。
+// hasUnservedJumpLocked 报告是否存在未服务的远跳转需求：保鲜需求中，
+// 落在顺序前沿 8MB 之后、且其后 8MB 内仍有空洞。调用方须持有 up.mu。
+func (up *Upstream) hasUnservedJumpLocked() bool {
+	if !up.ranged {
+		return false
+	}
+	front := up.seqFrontLocked()
+	now := time.Now()
+	for c, at := range up.wants {
+		if now.Sub(at) >= wantTTL || c <= front+8 {
+			continue
+		}
+		for i := c; i < c+8 && i < int64(len(up.have)); i++ {
+			if !up.have[i] && !up.fetch[i] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// seqFrontLocked 返回顺序前沿（第一个空洞分片）；调用方须持有 up.mu。
+func (up *Upstream) seqFrontLocked() int64 {
+	for i := range up.have {
+		if !up.have[int64(i)] {
+			return int64(i)
+		}
+	}
+	return int64(len(up.have))
+}
+
+// pickChunkLocked 选下一个要拉的分片：远跳转优先，其次新需求附近，再顺序预取。
 // 非 Range 模式只允许一个顺序拉取者。调用方须持有 up.mu。
 func (up *Upstream) pickChunkLocked() (int64, bool) {
 	if !up.ranged {
@@ -309,10 +380,37 @@ func (up *Upstream) pickChunkLocked() (int64, bool) {
 		}
 		return up.fetch[i]
 	}
-	// 跳转优先：在最近请求位置之后 32MB 内找空洞。
-	for _, w := range up.wants {
-		base := w / upstreamChunkSize
-		for i := base; i < base+32; i++ {
+	now := time.Now()
+	type want struct {
+		chunk int64
+		at    time.Time
+	}
+	var ws []want
+	for c, at := range up.wants {
+		if now.Sub(at) < wantTTL {
+			ws = append(ws, want{c, at})
+		}
+	}
+	sort.Slice(ws, func(a, b int) bool { return ws[a].at.After(ws[b].at) })
+	front := up.seqFrontLocked()
+	// 远跳转优先：落在顺序前沿 8MB 之后的需求先找其后 8MB 内空洞。
+	// 跳转流不等顺序预取填完，全程最多慢一个分片的拉取时间。
+	for _, w := range ws {
+		if w.chunk <= front+8 {
+			continue
+		}
+		for i := w.chunk; i < w.chunk+8; i++ {
+			if i >= int64(len(up.have)) {
+				break
+			}
+			if !claimed(i) {
+				return i, true
+			}
+		}
+	}
+	// 其余需求按由新到老，各找其后 8MB 内空洞。
+	for _, w := range ws {
+		for i := w.chunk; i < w.chunk+8; i++ {
 			if i >= int64(len(up.have)) {
 				break
 			}
@@ -357,6 +455,14 @@ func (up *Upstream) fetchChunk(idx int64) {
 	for attempt := 0; attempt < upstreamChunkRetries; attempt++ {
 		if up.ctx.Err() != nil {
 			return
+		}
+		// 退避重试：限流中的上游经不起热循环 hammer，1s/2s 阶梯等待。
+		if attempt > 0 {
+			select {
+			case <-up.ctx.Done():
+				return
+			case <-time.After(time.Duration(attempt) * time.Second):
+			}
 		}
 		ctx, cancel := context.WithTimeout(up.ctx, 30*time.Second)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, up.url, nil)

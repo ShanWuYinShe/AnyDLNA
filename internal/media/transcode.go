@@ -58,6 +58,9 @@ type Transcoder struct {
 	cachedURLs []string
 	cachedAt   time.Time
 
+	// resolveURLs 可注入的直链刷新函数（单测用）；nil 时走默认 DirectURLs。
+	resolveURLs func(ctx context.Context) ([]string, error)
+
 	// Go 传输模式的本机服务：Upstream 并发拉取上游并缓存，ffmpeg 以
 	// 普通 HTTP 输入（含 -ss Range 定位）从回环地址读取。随 Transcoder
 	// 创建而惰性启动，随 Stop 关闭；跳转（RestartAt）保留缓存。
@@ -259,11 +262,8 @@ func (t *Transcoder) StreamTo(w io.Writer) (cancel func(), done <-chan struct{},
 		}
 		if fallback {
 			// 播放列表（直播 m3u8 等）：相对分片地址无法经 Go 中转，
-			// 回退到 ffmpeg 直连（需 http 代理；socks 下由 CastURL 拦截）。
-			urls, uerr := t.directURLsLocked()
-			if uerr != nil {
-				return func() {}, nil, uerr
-			}
+			// 回退到 ffmpeg 直连。直链已由 ensureDirectLocked 解析并缓存。
+			urls := t.cachedURLs
 			var ss string
 			if ssSec > 0 && !t.isLive {
 				ss = strconv.FormatFloat(ssSec, 'f', 2, 64)
@@ -304,13 +304,12 @@ func (t *Transcoder) StreamTo(w io.Writer) (cancel func(), done <-chan struct{},
 }
 
 // directURLsLocked 返回本次拉流可用的直链（1 条一体流或 2 条分离音视频），
-// 优先复用 TTL 内的缓存，否则调用 yt-dlp 重新解析；调用方须持有 t.mu。
-// 注意 StreamTo 持锁调用，DirectURLs 内部不再加锁。
-func (t *Transcoder) directURLsLocked() ([]string, error) {
+// 优先复用 TTL 内的缓存，否则刷新；调用方须持有 t.mu。
+func (t *Transcoder) directURLsLocked(ctx context.Context) ([]string, error) {
 	if len(t.cachedURLs) > 0 && time.Since(t.cachedAt) < directCacheTTL {
 		return t.cachedURLs, nil
 	}
-	urls, err := DirectURLs(context.Background(), t.srcURL, t.opts)
+	urls, err := t.refreshURLs(ctx)
 	if err != nil {
 		// 缓存过期但重取失败时，若有旧链（刚过期）仍可一试；
 		// 直链 expire 通常数小时，刚过 TTL 大概率仍有效。
@@ -324,6 +323,14 @@ func (t *Transcoder) directURLsLocked() ([]string, error) {
 	return urls, nil
 }
 
+// refreshURLs 刷新直链：默认调 DirectURLs（yt-dlp -g）。
+func (t *Transcoder) refreshURLs(ctx context.Context) ([]string, error) {
+	if t.resolveURLs != nil {
+		return t.resolveURLs(ctx)
+	}
+	return DirectURLs(ctx, t.srcURL, t.opts)
+}
+
 // isPlaylistURL 报告直链是否为播放列表（m3u8 等）：这类地址指向的相对分片
 // 无法经 Go 中转（分片基准地址会错乱），必须由 ffmpeg 直连。
 func isPlaylistURL(u string) bool {
@@ -331,14 +338,34 @@ func isPlaylistURL(u string) bool {
 	return strings.Contains(lower, ".m3u8")
 }
 
+// prefetchBackoffs 是预热失败换新直链重试前的等待（googlevideo 的瞬时
+// 403/限流通常几秒内恢复；等待时释放锁，不阻塞其他拉流）。
+var prefetchBackoffs = []time.Duration{2 * time.Second, 5 * time.Second}
+
 // ensureDirectLocked 建好 Go 传输的本机服务，返回 ffmpeg 可用的输入地址与
 // 音频输入序号。fallback 为 true 时表示播放列表，调用方回退到 ffmpeg 直连。
-// 调用方须持有 t.mu（StreamTo/PrefetchDirect 持锁调用）。
+// 建传输失败时换一组新直链再试一次（直链可能被上游瞬时拒绝，如 403）。
+// 调用方须持有 t.mu（StreamTo 持锁调用）。
 func (t *Transcoder) ensureDirectLocked() (inputs []string, audioIdx int, fallback bool, err error) {
-	urls, err := t.directURLsLocked()
+	urls, err := t.directURLsLocked(context.Background())
 	if err != nil {
 		return nil, 0, false, err
 	}
+	if inputs, audioIdx, fallback, err := t.buildDirectLocked(urls); err == nil || fallback {
+		return inputs, audioIdx, fallback, err
+	} else {
+		Diagf("传输搭建失败，换新直链再试: %v", err)
+	}
+	// 刷新直链再建一次；仍失败则如实返回。
+	t.cachedURLs = nil
+	if urls, err = t.directURLsLocked(context.Background()); err != nil {
+		return nil, 0, false, err
+	}
+	return t.buildDirectLocked(urls)
+}
+
+// buildDirectLocked 用给定直链建上游与本机服务；调用方须持有 t.mu。
+func (t *Transcoder) buildDirectLocked(urls []string) (inputs []string, audioIdx int, fallback bool, err error) {
 	for _, u := range urls {
 		if isPlaylistURL(u) {
 			return nil, len(urls) - 1, true, nil
@@ -367,6 +394,10 @@ func (t *Transcoder) ensureDirectLocked() (inputs []string, audioIdx int, fallba
 		}
 		return nil, 0, false, fmt.Errorf("启动本机传输服务失败: %w", lerr)
 	}
+	// 建好即预热头部：电视拉流（ffmpeg 读 moov）到来时直接命中缓存。
+	for _, up := range ups {
+		up.WarmHead(2 * upstreamChunkSize)
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/v", ups[0])
 	if len(ups) == 2 {
@@ -391,23 +422,43 @@ func (t *Transcoder) directInputsLocked() []string {
 // PrefetchDirect 预热 Go 传输（直链 + 上游探测 + 本机服务），让投屏点击时
 // 就能发现解析/连通失败，而不是等电视拉流时才转圈。失败时返回错误，
 // 由调用方展示给用户。管道模式不需要直链，直接返回 nil。
+//
+// 上游可能瞬时拒绝直链（如 googlevideo 限流时的 403）：失败后换一组新直链
+// 最多重试 len(prefetchBackoffs) 次，每次等待递增（等待时释放锁）。
 func (t *Transcoder) PrefetchDirect(ctx context.Context) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.srcURL == "" || t.pipe {
 		return nil
 	}
-	// 构造时已带直链（ResolveDirect 附带）则只建传输；否则回退取一次。
-	if len(t.cachedURLs) == 0 {
-		urls, err := DirectURLs(ctx, t.srcURL, t.opts)
-		if err != nil {
-			return err
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		if attempt > 0 {
+			backoff := prefetchBackoffs[attempt-1]
+			t.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				t.mu.Lock()
+				return ctx.Err()
+			case <-time.After(backoff):
+			}
+			t.mu.Lock()
+			// 换新直链：清缓存迫使 directURLsLocked 重新解析。
+			t.cachedURLs = nil
 		}
-		t.cachedURLs = urls
-		t.cachedAt = time.Now()
+		urls, err := t.directURLsLocked(ctx)
+		if err != nil {
+			lastErr = err
+		} else if _, _, _, berr := t.buildDirectLocked(urls); berr != nil {
+			lastErr = berr
+		} else {
+			return nil
+		}
+		Diagf("传输预热第%d次失败: %v", attempt+1, lastErr)
+		if attempt >= len(prefetchBackoffs) {
+			return lastErr
+		}
 	}
-	_, _, _, err := t.ensureDirectLocked()
-	return err
 }
 
 // outputArgs 构造输出直播流的 ffmpeg 参数。

@@ -2,10 +2,12 @@ package media
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -235,5 +237,133 @@ func TestParseResolveJSON(t *testing.T) {
 	// 非法 JSON。
 	if _, _, err := parseResolveJSON([]byte("{")); err == nil {
 		t.Error("非法 JSON 应报错")
+	}
+}
+
+// TestPrefetchRetryOn403 预热遇上游瞬时拒绝（403）时换新直链重试。
+//
+// 背景：googlevideo 会瞬时拒绝刚解析出的直链（00:38 现场：解析成功 10 秒，
+// 预热 1 秒后 403）。直接报错等于把瞬时抖动 kinder 成投屏失败；
+// 换一组新直链通常立即恢复。
+func TestPrefetchRetryOn403(t *testing.T) {
+	payload := make([]byte, 256*1024)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+	}))
+	defer bad.Close()
+	good := rangeOrigin(t, payload)
+	defer good.Close()
+
+	old := prefetchBackoffs
+	prefetchBackoffs = []time.Duration{time.Millisecond}
+	defer func() { prefetchBackoffs = old }()
+
+	tc := NewURLTranscoder("u", false, Options{ProxyMode: ProxyModeNone},
+		Plan{Mode: OutputRemux, Container: ContainerMPEGTS, CopyVideo: true, CopyAudio: true}, "youtube", nil)
+	defer tc.Stop()
+	calls := 0
+	tc.resolveURLs = func(ctx context.Context) ([]string, error) {
+		calls++
+		if calls == 1 {
+			return []string{bad.URL}, nil
+		}
+		return []string{good.URL}, nil
+	}
+	if err := tc.PrefetchDirect(context.Background()); err != nil {
+		t.Fatalf("换链重试后应成功: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("应刷新两次直链，实际 %d 次", calls)
+	}
+	if len(tc.directUps) != 1 {
+		t.Fatal("传输服务应已建好")
+	}
+
+	// 持续拒绝时应如实报错（而不是无限重试）。
+	tc2 := NewURLTranscoder("u", false, Options{ProxyMode: ProxyModeNone},
+		Plan{Mode: OutputRemux, Container: ContainerMPEGTS, CopyVideo: true, CopyAudio: true}, "youtube", nil)
+	defer tc2.Stop()
+	tc2.resolveURLs = func(ctx context.Context) ([]string, error) { return []string{bad.URL}, nil }
+	if err := tc2.PrefetchDirect(context.Background()); err == nil {
+		t.Fatal("持续 403 应返回错误")
+	} else if !strings.Contains(err.Error(), "403") {
+		t.Fatalf("错误应包含状态码: %v", err)
+	}
+}
+
+// TestShortHost 报错中的 host 截取正确。
+func TestShortHost(t *testing.T) {
+	if got := shortHost("https://rr3---sn-abc.googlevideo.com/videoplayback?x=1"); got != "rr3---sn-abc.googlevideo.com" {
+		t.Errorf("host 不对: %q", got)
+	}
+	if got := shortHost("not a url at all !@#"); got == "" {
+		t.Error("非法 URL 也应返回点什么")
+	}
+}
+
+// TestUpstreamSeekNotStarved 顺序播放流全速消耗时，跳转请求必须在限时内可读。
+//
+// 背景：旧调度用定长追加队列记需求位置，顺序流的高频请求几秒就把跳转位置
+// 挤掉，跳转流永远分不到 worker（实测跳转后 40 秒零字节）。现按分片去重+
+// 保鲜，跳转区域优先填满。
+func TestUpstreamSeekNotStarved(t *testing.T) {
+	payload := make([]byte, 16*1024*1024)
+	for i := range payload {
+		payload[i] = byte(i * 13)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		http.ServeContent(w, r, "v.mp4", time.Now(), bytes.NewReader(payload))
+	}))
+	defer srv.Close()
+	up, err := NewUpstream(srv.URL, Options{ProxyMode: ProxyModeNone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer up.Close()
+
+	// 顺序读者：持续从头消耗（模拟正常播放）。
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		var off int64
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", off, off+256*1024-1))
+			rec := httptest.NewRecorder()
+			up.ServeHTTP(rec, req)
+			if rec.Code != http.StatusPartialContent {
+				return
+			}
+			off += 256 * 1024
+			if off >= int64(len(payload)) {
+				return
+			}
+		}
+	}()
+	time.Sleep(300 * time.Millisecond) // 让顺序流先跑起来，占住 worker
+
+	// 跳转读者：尾部 1MB 必须在 15 秒内可读。
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-", len(payload)-1024*1024))
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { up.ServeHTTP(rec, req); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("跳转位置 15 秒仍不可读，调度饿死回归")
+	}
+	body, _ := io.ReadAll(rec.Result().Body)
+	if !bytes.Equal(body, payload[len(payload)-1024*1024:]) {
+		t.Fatal("跳转内容不对")
 	}
 }
