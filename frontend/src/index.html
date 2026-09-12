@@ -37,6 +37,11 @@
                 <input class="url-input" id="urlInput" placeholder="粘贴视频链接：YouTube / Bilibili / m3u8 / mp4…"/>
                 <button class="btn" id="btnResolve">解析</button>
             </div>
+            <div class="url-row">
+                <input class="url-input" id="proxyInput" placeholder="代理（访问 YouTube 等被墙站点时填写，如 http://127.0.0.1:10809；留空直连）"/>
+                <input class="url-input narrow" id="cookieInput" placeholder="Cookie 来源：chrome/safari/firefox"/>
+                <button class="btn" id="btnTestProxy">测试</button>
+            </div>
             <div class="video-card hidden" id="videoCard">
                 <div class="video-name" id="vName"></div>
                 <div class="video-meta" id="vMeta"></div>

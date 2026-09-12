@@ -18,6 +18,10 @@ export function GetCastStatus() {
   return window['go']['main']['App']['GetCastStatus']();
 }
 
+export function GetOptions() {
+  return window['go']['main']['App']['GetOptions']();
+}
+
 export function GetVolume() {
   return window['go']['main']['App']['GetVolume']();
 }
@@ -46,10 +50,18 @@ export function SeekTo(arg1) {
   return window['go']['main']['App']['SeekTo'](arg1);
 }
 
+export function SetOptions(arg1, arg2) {
+  return window['go']['main']['App']['SetOptions'](arg1, arg2);
+}
+
 export function SetVolume(arg1) {
   return window['go']['main']['App']['SetVolume'](arg1);
 }
 
 export function StopCast() {
   return window['go']['main']['App']['StopCast']();
+}
+
+export function TestProxy(arg1) {
+  return window['go']['main']['App']['TestProxy'](arg1);
 }

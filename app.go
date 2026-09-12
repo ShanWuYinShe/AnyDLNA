@@ -67,6 +67,8 @@ type App struct {
 	ctx           context.Context
 	streamSrv     *media.StreamServer
 	watcherCancel context.CancelFunc
+	proxy         string // 在线视频访问代理；空为直连
+	cookieBrowser string // yt-dlp 读取登录态的浏览器；空为不使用
 
 	mu        sync.Mutex
 	devices   []*dlna.Device // 已发现的渲染设备（搜索结果 + 被动监听累积）
@@ -79,9 +81,12 @@ type App struct {
 // NewApp 创建应用实例。
 func NewApp() *App { return &App{} }
 
-// startup 在应用启动时创建流服务并开启设备广播常驻监听。
+// startup 在应用启动时创建流服务、加载配置并开启设备广播常驻监听。
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	cfg := media.LoadConfig()
+	a.proxy = cfg.Proxy
+	a.cookieBrowser = cfg.CookieBrowser
 	srv, err := media.NewStreamServer()
 	if err != nil {
 		runtime.LogErrorf(ctx, "启动流服务失败: %v", err)
@@ -289,9 +294,12 @@ func (a *App) ResolveURL(rawURL string) (*ResolvedInfo, error) {
 	if !media.HasYtDlp() {
 		return nil, errors.New("未安装 yt-dlp，无法解析在线视频；请执行 brew install yt-dlp")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	a.mu.Lock()
+	proxy, cookieBrowser := a.proxy, a.cookieBrowser
+	a.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	r, err := media.Resolve(ctx, rawURL)
+	r, err := media.Resolve(ctx, rawURL, proxy, cookieBrowser)
 	if err != nil {
 		return nil, err
 	}
@@ -303,6 +311,31 @@ func (a *App) ResolveURL(rawURL string) (*ResolvedInfo, error) {
 		Extractor:   r.Extractor,
 		Uploader:    r.Uploader,
 	}, nil
+}
+
+// GetOptions 返回当前在线视频访问配置（代理与 Cookie 来源）。
+func (a *App) GetOptions() *media.Config {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return &media.Config{Proxy: a.proxy, CookieBrowser: a.cookieBrowser}
+}
+
+// SetOptions 保存在线视频访问配置并持久化；代理为空表示直连。
+func (a *App) SetOptions(proxy, cookieBrowser string) error {
+	proxy = strings.TrimSpace(proxy)
+	cookieBrowser = strings.TrimSpace(strings.ToLower(cookieBrowser))
+	a.mu.Lock()
+	a.proxy = proxy
+	a.cookieBrowser = cookieBrowser
+	a.mu.Unlock()
+	return media.SaveConfig(media.Config{Proxy: proxy, CookieBrowser: cookieBrowser})
+}
+
+// TestProxy 验证代理连通性（通过代理访问轻量检测端点）。
+func (a *App) TestProxy(proxy string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	return media.TestProxy(ctx, strings.TrimSpace(proxy))
 }
 
 // CastURL 把在线视频（YouTube、Bilibili 等视频网站页面或流地址）
@@ -331,11 +364,14 @@ func (a *App) CastURL(udn, rawURL string) (*CastStatus, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	resolved, err := media.Resolve(ctx, rawURL)
+	a.mu.Lock()
+	proxy, cookieBrowser := a.proxy, a.cookieBrowser
+	a.mu.Unlock()
+	resolved, err := media.Resolve(ctx, rawURL, proxy, cookieBrowser)
 	if err != nil {
 		return nil, err
 	}
-	sessionID := a.streamSrv.AddTranscodeURL(rawURL, resolved.Title, resolved.IsLive)
+	sessionID := a.streamSrv.AddTranscodeURL(rawURL, resolved.Title, resolved.IsLive, proxy, cookieBrowser)
 	ip, err := netutil.LANIP()
 	if err != nil {
 		a.streamSrv.Remove(sessionID)

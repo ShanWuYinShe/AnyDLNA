@@ -13,15 +13,17 @@ import (
 // 本地源由 ffmpeg 直接读取；在线源先经 yt-dlp 解析合并为流，再管道交给 ffmpeg。
 // 同一时间至多一路进程；更换起始位置时旧进程被终止，新进程在下一次拉流时启动。
 type Transcoder struct {
-	mu     sync.Mutex
-	path   string    // 本地文件路径；为空表示在线源
-	srcURL string    // 在线视频页面/流地址（走 yt-dlp）
-	isLive bool      // 直播流（不支持 --download-sections 快进）
-	offset int64     // 转码起始位置（毫秒），供下一次启动使用
-	cmd    *exec.Cmd // ffmpeg 进程
-	srcCmd *exec.Cmd // yt-dlp 进程（仅在线源）
-	done   chan struct{}
-	stderr *limitBuffer // 最近一次进程 stderr（诊断用）
+	mu            sync.Mutex
+	path          string    // 本地文件路径；为空表示在线源
+	srcURL        string    // 在线视频页面/流地址（走 yt-dlp）
+	isLive        bool      // 直播流（不支持 --download-sections 快进）
+	proxy         string    // 在线源访问代理；空为直连
+	cookieBrowser string    // yt-dlp 读取登录态的浏览器；空为不使用
+	offset        int64     // 转码起始位置（毫秒），供下一次启动使用
+	cmd           *exec.Cmd // ffmpeg 进程
+	srcCmd        *exec.Cmd // yt-dlp 进程（仅在线源）
+	done          chan struct{}
+	stderr        *limitBuffer // 最近一次进程 stderr（诊断用）
 }
 
 // NewTranscoder 创建针对本地文件的转码器。
@@ -30,8 +32,8 @@ func NewTranscoder(path string) *Transcoder {
 }
 
 // NewURLTranscoder 创建针对在线视频源的转码器。
-func NewURLTranscoder(url string, isLive bool) *Transcoder {
-	return &Transcoder{srcURL: url, isLive: isLive}
+func NewURLTranscoder(url string, isLive bool, proxy, cookieBrowser string) *Transcoder {
+	return &Transcoder{srcURL: url, isLive: isLive, proxy: proxy, cookieBrowser: cookieBrowser}
 }
 
 // RestartAt 终止当前进程并记录新的起始位置，等待下一次拉流时重新启动。
@@ -98,7 +100,7 @@ func (t *Transcoder) StreamTo(w io.Writer) (cancel func(), done <-chan struct{},
 	} else {
 		// 在线源：seek 由 yt-dlp --download-sections 完成（管道不可 seek），
 		// ffmpeg 从 stdin 读取 yt-dlp 已合并的音视频流。
-		srcCmd = exec.Command("yt-dlp", ytDlpStreamArgs(t.srcURL, ssSec, t.isLive)...)
+		srcCmd = exec.Command("yt-dlp", ytDlpStreamArgs(t.srcURL, ssSec, t.isLive, t.proxy, t.cookieBrowser)...)
 		srcCmd.Stderr = stderr
 		srcStdout, pipeErr := srcCmd.StdoutPipe()
 		if pipeErr != nil {

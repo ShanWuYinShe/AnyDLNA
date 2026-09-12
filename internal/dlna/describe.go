@@ -159,7 +159,11 @@ func resolveReference(base *url.URL, raw string) string {
 	return base.ResolveReference(ref).String()
 }
 
-// defaultHTTPClient 供控制点复用；DLNA 设备都在局域网，超时从严。
+// defaultHTTPClient 供控制点复用；DLNA 设备都在局域网，超时从严，
+// 且显式禁用代理——即使环境变量配置了 HTTP_PROXY 也不影响局域网控制。
 func defaultHTTPClient() *http.Client {
-	return &http.Client{Timeout: 10 * time.Second}
+	return &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: &http.Transport{Proxy: nil},
+	}
 }

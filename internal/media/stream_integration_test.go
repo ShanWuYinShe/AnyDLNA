@@ -39,7 +39,7 @@ func TestURLStreamIntegration(t *testing.T) {
 	// 1) Resolve：元数据解析。
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	res, err := Resolve(ctx, base+"/sample.mp4")
+	res, err := Resolve(ctx, base+"/sample.mp4", "", "")
 	if err != nil {
 		t.Fatalf("Resolve 失败: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestURLStreamIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ss.Close()
-	id := ss.AddTranscodeURL(base+"/sample.mp4", res.Title, res.IsLive)
+	id := ss.AddTranscodeURL(base+"/sample.mp4", res.Title, res.IsLive, "", "")
 
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/t/%s", ss.Port(), id))
 	if err != nil {

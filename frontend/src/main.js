@@ -93,6 +93,42 @@ if (window.runtime && window.runtime.EventsOn) {
     });
 }
 
+// ---------- 代理设置 ----------
+
+async function initProxy() {
+    try {
+        const opt = await window.go.main.App.GetOptions();
+        $('proxyInput').value = opt.proxy || '';
+        $('cookieInput').value = opt.cookieBrowser || '';
+    } catch { /* 忽略，保持为空 */ }
+}
+
+async function saveProxy() {
+    try {
+        await call('SetOptions', $('proxyInput').value.trim(), $('cookieInput').value.trim());
+        toast($('proxyInput').value.trim() ? '代理设置已保存并生效' : '已切换为直连');
+    } catch { /* toast 已提示 */ }
+}
+
+async function testProxy() {
+    const p = $('proxyInput').value.trim();
+    if (!p) { toast('请先填写代理地址'); return; }
+    await saveProxy();
+    $('btnTestProxy').disabled = true;
+    $('btnTestProxy').textContent = '测试中…';
+    try {
+        await window.go.main.App.TestProxy(p);
+        toast('代理可用；如 YouTube 提示验证，请在 Cookie 来源填 chrome 等浏览器名');
+    } catch (err) {
+        const msg = typeof err === 'string' ? err : (err && err.message) || '测试失败';
+        toast(msg);
+    }
+    finally {
+        $('btnTestProxy').disabled = false;
+        $('btnTestProxy').textContent = '测试';
+    }
+}
+
 // ---------- 视频来源（本地文件 / 在线链接）----------
 
 async function pickVideo() {
@@ -209,6 +245,10 @@ $('urlInput').onkeydown = (e) => { if (e.key === 'Enter') resolveURL(); };
 $('btnCast').onclick = cast;
 $('btnStop').onclick = stopCast;
 $('btnPlayPause').onclick = () => call('PlayPause').catch(() => {});
+$('btnTestProxy').onclick = testProxy;
+$('proxyInput').onchange = saveProxy;
+$('cookieInput').onchange = saveProxy;
+initProxy();
 
 const seek = $('seek');
 seek.oninput = () => { state.scrubbing = true; };

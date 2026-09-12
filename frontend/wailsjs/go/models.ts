@@ -105,3 +105,22 @@ export namespace main {
 
 }
 
+export namespace media {
+	
+	export class Config {
+	    proxy: string;
+	    cookie_browser: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Config(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.proxy = source["proxy"];
+	        this.cookie_browser = source["cookie_browser"];
+	    }
+	}
+
+}
+

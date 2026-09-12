@@ -90,6 +90,7 @@ body {
 }
 .url-input:focus { border-color: var(--accent); }
 .url-input::placeholder { color: var(--text-dim); }
+.url-input.narrow { flex: 0 0 230px; }
 
 /* 按钮 */
 .btn {

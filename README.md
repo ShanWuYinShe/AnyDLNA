@@ -29,7 +29,14 @@ wails build   # 产出 build/bin/AnyDLNA.app（macOS）
 2. 选择视频来源：粘贴在线视频链接后点「解析」，或点「选择本地视频」。
 3. 点击「投屏到选中设备」，底部出现播放控制条即可控制。
 
-> 注意：在线视频经本机实时转码，清晰度默认为 yt-dlp 所选最佳格式，转码码率上限 4 Mbps。B 站部分高清清晰度需要登录 Cookie，本应用暂未集成 Cookie 配置。
+## 代理与 Cookies（访问 YouTube 等被墙站点）
+
+在「视频来源」面板下方可设置：
+
+- **代理**：如 `http://127.0.0.1:10809`，填好后点「测试」验证连通性。代理只作用于 yt-dlp 的在线视频解析/拉流；设备发现与投屏流始终走局域网直连，不受影响。
+- **Cookie 来源**：填浏览器名（`chrome` / `safari` / `firefox` / `edge`）。YouTube 等站点对代理出口 IP 常要求人机验证（"Sign in to confirm you're not a bot"），此时需提供已登录该站点的浏览器 Cookies。首次读取 Chrome Cookies 时 macOS 会请求钥匙串授权，请点允许。设置持久化保存在 `~/Library/Application Support/AnyDLNA/config.json`。
+
+> 注意：在线视频经本机实时转码，清晰度默认为 yt-dlp 所选最佳格式，转码码率上限 4 Mbps。
 
 ## 搜索不到设备？
 

@@ -85,8 +85,9 @@ func (s *StreamServer) AddTranscode(path, title string) string {
 }
 
 // AddTranscodeURL 注册在线视频转码会话：yt-dlp 解析拉流，ffmpeg 转码为 MPEG-TS。
-func (s *StreamServer) AddTranscodeURL(url, title string, isLive bool) string {
-	return s.add(&session{id: newSessionID(), direct: false, mime: mpegtsMIME, title: title, tc: NewURLTranscoder(url, isLive)})
+// proxy 非空时 yt-dlp 经代理访问；cookieBrowser 非空时读取该浏览器登录态。
+func (s *StreamServer) AddTranscodeURL(url, title string, isLive bool, proxy, cookieBrowser string) string {
+	return s.add(&session{id: newSessionID(), direct: false, mime: mpegtsMIME, title: title, tc: NewURLTranscoder(url, isLive, proxy, cookieBrowser)})
 }
 
 func (s *StreamServer) add(sess *session) string {
