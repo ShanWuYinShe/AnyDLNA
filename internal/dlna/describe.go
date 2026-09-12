@@ -147,16 +147,42 @@ func DescribeByHost(ctx context.Context, host string) (*Device, error) {
 }
 
 // resolveReference 将描述中的相对 URL 基于 LOCATION 解析为绝对 URL。
+//
+// 需要兼容两类不规范的设备写法：
+//   - 部分设备把 controlURL 写成 "_urn:schemas-upnp-org:service:AVTransport_control"。
+//     按 RFC 3986，相对引用的首个路径段不能含冒号，url.Parse 会直接报错
+//     （"first path segment in URL cannot contain colon"）。
+//   - 部分设备写成 "urn:schemas-upnp-org:service:AVTransport" 这类伪 scheme
+//     形式，url.Parse 会成功但得到的引用没有主机，无法用于 HTTP 请求。
+//
+// 两种情况的处理方式一致：补前导 "/" 使其成为合法的相对根路径引用。
+// 正常的相对路径（含以 "/" 开头的）保持原有语义不变，不做多余改写。
 func resolveReference(base *url.URL, raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
 	}
+
 	ref, err := url.Parse(raw)
-	if err != nil {
-		return raw
+	switch {
+	case err == nil && ref.Host != "" && ref.Scheme != "":
+		// 带协议的绝对 URL，直接采用。
+		return ref.String()
+	case err == nil && ref.Host != "":
+		// 协议相对形式（//host/path）：补上与 LOCATION 相同的协议。
+		ref.Scheme = base.Scheme
+		return ref.String()
+	case err == nil && ref.Scheme == "" && ref.Opaque == "":
+		// 常规相对路径：交由标准库按 RFC 3986 解析（保留目录相对语义）。
+		return base.ResolveReference(ref).String()
 	}
-	return base.ResolveReference(ref).String()
+
+	// 解析失败，或形如 "urn:..." 的无主机伪 scheme：按相对根路径处理。
+	path := raw
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return base.ResolveReference(&url.URL{Path: path}).String()
 }
 
 // defaultHTTPClient 供控制点复用；DLNA 设备都在局域网，超时从严，
