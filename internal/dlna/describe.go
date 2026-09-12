@@ -110,7 +110,9 @@ func DescribeByHost(ctx context.Context, host string) (*Device, error) {
 	if !strings.Contains(host, ":") {
 		// 未指定端口：轮询常见 UPnP 端口。
 		for _, port := range []string{"49152", "49153", "49154", "8080", "7676", "36669", "55000", "51423"} {
-			candidates = append(candidates, "http://"+host+":"+port+"/dd.xml", "http://"+host+":"+port+"/")
+			for _, path := range []string{"/dd.xml", "/description.xml", "/"} {
+				candidates = append(candidates, "http://"+host+":"+port+path)
+			}
 		}
 	} else {
 		for _, path := range []string{"/dd.xml", "/description.xml", "/device.xml", "/"} {
