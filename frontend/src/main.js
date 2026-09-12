@@ -42,19 +42,25 @@ function errText(err) {
 
 async function searchDevices() {
     $('deviceHint').textContent = '正在搜索局域网设备…';
-    $('deviceList').innerHTML = '';
-    state.selectedUDN = null;
     try {
         const devices = await call('SearchDevices', 6000);
-        if (!devices.length) {
-            $('deviceHint').textContent = '未发现设备：应用会持续监听电视广播，设备上线后会自动出现在列表；也可在下方输入电视 IP 手动添加';
-            return;
-        }
-        $('deviceHint').textContent = `发现 ${devices.length} 台设备，点击选择`;
+        // 与已有列表合并去重，不清空旧设备：本次没应答的设备（广播间隔、
+        // 丢包、临时离线）不代表已失效，直接清空会让用户丢失已在列表中的设备。
+        // addDeviceItem 按 UDN 去重，已存在的设备不会被重复添加。
         devices.forEach(addDeviceItem);
+        updateDeviceHint();
     } catch {
         $('deviceHint').textContent = '搜索失败，请重试';
     }
+}
+
+// updateDeviceHint 按列表实际内容更新提示。
+// 用 DOM 里的数量而非本次搜索结果，才能反映合并后的完整列表。
+function updateDeviceHint() {
+    const total = $('deviceList').querySelectorAll('.device').length;
+    $('deviceHint').textContent = total
+        ? `列表中共 ${total} 台设备，点击选择`
+        : '未发现设备：应用会持续监听电视广播，设备上线后会自动出现在列表；也可在下方输入电视 IP 手动添加';
 }
 
 // addDeviceItem 把一台设备渲染进列表并绑定选中事件；同一设备（UDN）不重复添加。
