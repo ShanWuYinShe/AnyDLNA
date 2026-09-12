@@ -261,3 +261,24 @@ func ensureLoopbackFree(t *testing.T) {
 	}
 	_ = ln.Close()
 }
+
+// TestSearchBudgetExceedsSearchWindow 是设备搜索的回归测试。
+//
+// 背景：SSDP 搜索阶段（searchDevices）会一直等到超时才返回，之后才逐个
+// 抓取并解析设备描述。此前 ctx 的截止时间与搜索窗口相同，导致描述请求
+// 运行在已过期的上下文上、立即失败，最终「搜索成功却一台设备都没有」，
+// 而且不报任何错——表现为用户界面上永远搜不到设备。
+//
+// 该测试固定住这条约束：ctx 的总预算必须严格大于搜索窗口。
+func TestSearchBudgetExceedsSearchWindow(t *testing.T) {
+	for _, ms := range []int{1, 1000, 6000, 15000} {
+		window := time.Duration(ms) * time.Millisecond
+		got := searchBudget(ms)
+		if got <= window {
+			t.Errorf("timeoutMS=%d: 总预算 %v 未超过搜索窗口 %v，描述解析会因 ctx 过期而失败", ms, got, window)
+		}
+		if got-window != describeBudget {
+			t.Errorf("timeoutMS=%d: 描述预算应为 %v，实际 %v", ms, describeBudget, got-window)
+		}
+	}
+}

@@ -549,3 +549,22 @@ $('vol').oninput = () => {
     clearTimeout(volTimer);
     volTimer = setTimeout(() => call('SetVolume', Number($('vol').value)).catch(() => {}), 300);
 };
+
+// ---------- 启动 ----------
+
+// whenReady 等待 Wails 注入的绑定可用后再执行。
+// 运行时脚本可能晚于本脚本执行，直接调用会因 window.go 尚未定义而失败。
+function whenReady(fn, tries = 50) {
+    if (window.go && window.go.main && window.go.main.App) {
+        fn();
+        return;
+    }
+    if (tries > 0) {
+        setTimeout(() => whenReady(fn, tries - 1), 100);
+    }
+}
+
+// 打开即搜索一次。被动监听只能等到设备主动广播 SSDP alive，
+// 而不少电视（含实测的目标设备）平时不广播、只应答搜索，
+// 若只依赖监听，打开应用后列表会长时间为空，看起来像「搜不到设备」。
+whenReady(searchDevices);

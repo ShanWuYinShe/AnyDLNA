@@ -173,18 +173,38 @@ func deviceInfoOf(d *dlna.Device) DeviceInfo {
 	}
 }
 
+// describeBudget 是 SSDP 搜索之后用于抓取并解析设备描述的额外时间预算。
+//
+// 必须与搜索窗口分开计算：searchDevices 会一直等到超时才返回，
+// 若 ctx 的截止时间与搜索窗口相同，随后的描述请求就运行在已过期的
+// 上下文上、立即失败，最终表现为「搜索完成但一台设备都没有」。
+const describeBudget = 15 * time.Second
+
+// searchBudget 返回主动搜索的总时间预算：SSDP 搜索窗口 + 描述解析预算。
+// 单独抽出是为了让「ctx 必须比搜索窗口宽裕」这一约束能被测试固定住。
+func searchBudget(timeoutMS int) time.Duration {
+	return time.Duration(timeoutMS)*time.Millisecond + describeBudget
+}
+
 // SearchDevices 主动搜索局域网内的 DLNA 渲染设备，并合并常驻监听已发现的设备。
 func (a *App) SearchDevices(timeoutMS int) ([]DeviceInfo, error) {
 	if timeoutMS <= 0 || timeoutMS > 15000 {
 		timeoutMS = 6000
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMS)*time.Millisecond)
+	searchWindow := time.Duration(timeoutMS) * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), searchBudget(timeoutMS))
 	defer cancel()
 
-	devices, err := dlna.DiscoverRenderers(ctx, time.Duration(timeoutMS)*time.Millisecond)
+	devices, err := dlna.DiscoverRenderers(ctx, searchWindow)
 	if err != nil {
 		return nil, fmt.Errorf("搜索设备失败: %w", err)
 	}
+	// 记录搜索结果：设备「搜不到」时，可据此区分是网络没响应，
+	// 还是响应了但描述解析 / 服务过滤没通过。
+	for _, d := range devices {
+		a.logf("搜索到设备: %s (%s) @ %s", d.FriendlyName, d.UDN, d.Location)
+	}
+	a.logf("搜索设备完成：发现 %d 台", len(devices))
 
 	a.mu.Lock()
 	merged := make([]*dlna.Device, 0, len(devices)+len(a.devices))
