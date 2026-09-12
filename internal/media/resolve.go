@@ -46,13 +46,15 @@ func HasYtDlp() bool {
 
 // ytDlpCommonArgs 构造代理与 Cookies 相关的公共参数。
 // manual 模式显式指定代理；none 模式传空串强制直连（否则 yt-dlp 会自行读取
-// 环境变量与操作系统代理）；system 模式不传参，交给 yt-dlp 自行探测。
+// 环境变量与操作系统代理）；system 模式由应用自己读出系统代理后显式传入。
 // CookieFile（内置浏览器导出）优先于 CookieBrowser（读取本机浏览器）。
 func ytDlpCommonArgs(opts Options) []string {
 	var args []string
 	switch opts.ProxyMode {
 	case ProxyModeManual:
 		args = append(args, "--proxy", opts.Proxy)
+	case ProxyModeSystem:
+		args = append(args, systemProxyArgs()...)
 	case ProxyModeNone:
 		args = append(args, "--proxy", "")
 	}
@@ -62,6 +64,23 @@ func ytDlpCommonArgs(opts Options) []string {
 		args = append(args, "--cookies-from-browser", opts.CookieBrowser)
 	}
 	return args
+}
+
+// systemProxyArgs 返回 system 模式下应传给 yt-dlp 的代理参数。
+//
+// 不能让 yt-dlp 自行探测操作系统代理：macOS 上它经 Python 的 _scproxy 读取，
+// 而 _scproxy 把系统 SOCKS 代理报成 {'socks': 'http://127.0.0.1:10808'}——
+// 协议头是 http，端口却说的是 SOCKS，于是 yt-dlp 用 HTTP 去连 SOCKS 端口，
+// 连接直接卡死（实测 5 分钟无任何输出）。这里改由应用按正确协议读取
+// （见 parseScutilProxy，SOCKS 用 socks5://）并显式传入。
+//
+// 未能读出代理时不传参，保持 yt-dlp 原有的环境变量与系统探测行为。
+func systemProxyArgs() []string {
+	proxy := strings.TrimSpace(DetectSystemProxy())
+	if proxy == "" {
+		return nil
+	}
+	return []string{"--proxy", proxy}
 }
 
 // Resolve 用 yt-dlp 解析视频页面 URL，提取标题、时长与直播标记。
@@ -126,12 +145,30 @@ func ytDlpErrTail(stderr string) string {
 	return tail
 }
 
+// streamConcurrentFragments 是下载 DASH/HLS 分片时的并发连接数。
+//
+// yt-dlp 默认一次只下一个分片，即整条流只占一条 TCP 连接。这对国内直连的
+// 站点无所谓，但在需要代理的站点（YouTube 等）上是致命瓶颈：单连接的吞吐
+// 由这条连接自身的延迟与丢包决定，而多路复用型代理（XHTTP、mux 等）单连接
+// 往往只有几十 KB/s——浏览器之所以快，正因为它对同一域名会同时开多条连接。
+//
+// 实测（VLESS + XHTTP 代理，同一 YouTube 视频，45 秒采样）：
+//   - 并发 1：仅下到 2.4 MB（104 KB/s，77 MB 预计 12 分钟）
+//   - 并发 8：81 MB 完整下载完成（峰值 835 KB/s，音频段 4–8 MB/s）
+//
+// 取 8 是兼顾提速与不给代理造成过多并发压力的折中。
+const streamConcurrentFragments = 8
+
 // ytDlpStreamArgs 构造把在线视频（已合并音视频）写到 stdout 的 yt-dlp 参数。
 // 与 Resolve 使用同一 formatSelector，保证解析阶段报告编码与实际拉流一致；
 // startSec>0 且非直播时用 --download-sections 实现快进到指定位置；
 // opts 语义见 ytDlpCommonArgs。
 func ytDlpStreamArgs(url string, startSec float64, isLive bool, opts Options) []string {
-	args := append([]string{"-q", "--no-playlist", "--no-warnings", "-f", formatSelector}, ytDlpCommonArgs(opts)...)
+	args := append([]string{
+		"-q", "--no-playlist", "--no-warnings",
+		"--concurrent-fragments", strconv.Itoa(streamConcurrentFragments),
+		"-f", formatSelector,
+	}, ytDlpCommonArgs(opts)...)
 	if startSec > 0 && !isLive {
 		args = append(args, "--download-sections", "*"+strconv.FormatFloat(startSec, 'f', 2, 64)+"-inf")
 	}
