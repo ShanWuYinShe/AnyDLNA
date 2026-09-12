@@ -176,8 +176,8 @@ func (s *StreamServer) serveTranscode(w http.ResponseWriter, r *http.Request) {
 	case <-done:
 	}
 	cancel()
-	if sess.tc.stderr != nil && sess.tc.stderr.Len() > 0 {
-		log.Printf("转码进程输出: %s", sess.tc.stderr.String())
+	if msg := sess.tc.LastStderr(); msg != "" {
+		log.Printf("转码进程输出: %s", msg)
 	}
 }
 
