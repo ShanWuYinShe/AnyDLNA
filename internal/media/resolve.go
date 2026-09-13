@@ -194,6 +194,11 @@ func ResolveDirect(ctx context.Context, url string, opts Options) (*Resolved, []
 	if !HasYtDlp() {
 		return nil, nil, MissingToolError("yt-dlp")
 	}
+	// 缓存命中直接返回（重复投屏省 7~30 秒）；直链 TTL 内有效，见 resolvecache.go。
+	if resolved, urls, ok := lookupResolveCache(url); ok {
+		Diagf("解析命中缓存 站点=%s 直链=%d条 url=%.80s", resolved.Extractor, len(urls), url)
+		return resolved, urls, nil
+	}
 	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
@@ -216,6 +221,7 @@ func ResolveDirect(ctx context.Context, url string, opts Options) (*Resolved, []
 		return nil, nil, perr
 	}
 	Diagf("解析成功 %.1fs 站点=%s 直链=%d条 url=%.80s", time.Since(t0).Seconds(), resolved.Extractor, len(urls), url)
+	storeResolveCache(url, resolved, urls)
 	return resolved, urls, nil
 }
 

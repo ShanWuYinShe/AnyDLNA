@@ -28,7 +28,7 @@ fetch() { # fetch <url> <output>
 	curl -sSL --retry 5 --retry-all-errors --max-time 1200 -o "$2" "$1"
 }
 
-# fetch_big <url> <output>：4 路 Range 并行下载后拼接。
+# fetch_big <url> <output>：8 路 Range 并行下载后拼接。
 # 大文件（ffmpeg 静态包几十 MB）经抖动代理单连接必断：实测 -C - 续传会被
 # 中间环节截断归零，并行分段每段独立重试，坏一段只重下那一段。
 fetch_big() {
@@ -76,16 +76,14 @@ if [ ! -x "$TOOLS/yt-dlp" ]; then
 fi
 "$TOOLS/yt-dlp" --version
 
-# ---- ffmpeg / ffprobe：osxexperts 静态构建（按 CPU 架构选包，x86_64 跑 Rosetta
-# 不可靠——干净机器可能没装。evermeet 只有 x86_64（实测 file 为纯 x86_64），弃用。
-# 注意 Intel 包目前最高 8.0，与 arm 的 9 分开 pin，升级时分别确认。
-if [ "$ARCH" = "x86_64" ]; then
-	FFMPEG_URL="https://www.osxexperts.net/ffmpeg80intel.zip"
-	FFPROBE_URL="https://www.osxexperts.net/ffprobe80intel.zip"
-else
-	FFMPEG_URL="https://www.osxexperts.net/ffmpeg9arm.zip"
-	FFPROBE_URL="https://www.osxexperts.net/ffprobe9arm.zip"
+# ---- ffmpeg / ffprobe：osxexperts arm64 静态构建。
+# 只支持 arm64（evermeet 只有 x86_64 实测弃用；Intel Mac 不再维护）。
+if [ "$ARCH" != "arm64" ]; then
+	echo "仅支持 arm64 打包，当前 $ARCH" >&2
+	exit 1
 fi
+FFMPEG_URL="https://www.osxexperts.net/ffmpeg9arm.zip"
+FFPROBE_URL="https://www.osxexperts.net/ffprobe9arm.zip"
 # cached_zip <file>：缓存包完好时跳过下载。
 cached_zip() {
 	[ -f "$1" ] && unzip -t -q "$1" >/dev/null 2>&1
