@@ -76,7 +76,24 @@ func ytDlpCommonArgs(opts Options) []string {
 	} else if opts.CookieBrowser != "" {
 		args = append(args, "--cookies-from-browser", opts.CookieBrowser)
 	}
+	args = append(args, bundledJSRuntimeArgs()...)
 	return append(args, "--socket-timeout", "15", "--retries", "3")
+}
+
+// bundledJSRuntimeArgs 在自带 qjs 存在时显式启用它解 JS challenge。
+//
+// yt-dlp 默认只启用 deno；干净机器没有 deno/node 时 challenge 无解、
+// 部分视频直接无格式。自带 qjs（2.6MB，quickjs 官方行为）经实测 8.2 秒
+// 解出同视频（deno 本机 6.9 秒）。显式传二进制路径，不依赖 PATH 碰运气；
+// 该 flag 是增量启用（deno 仍优先），有 deno 的机器行为不变。
+// 无自带 qjs（开发环境）时返回空，保持原有逻辑。
+func bundledJSRuntimeArgs() []string {
+	if path, ok := ResolveTool("qjs"); ok {
+		if dir := bundledToolDir(); dir != "" && strings.HasPrefix(path, dir) {
+			return []string{"--js-runtimes", "quickjs:" + path}
+		}
+	}
+	return nil
 }
 
 // systemProxyArgs 返回 system 模式下应传给 yt-dlp 的代理参数。

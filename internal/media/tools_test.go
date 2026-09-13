@@ -200,3 +200,36 @@ func containsString(list []string, want string) bool {
 	}
 	return false
 }
+
+// TestBundledToolDirFrom 模拟 .app 目录布局，自带目录存在即命中、否则为空。
+func TestBundledToolDirFrom(t *testing.T) {
+	root := t.TempDir()
+	macOS := filepath.Join(root, "AnyDLNA.app", "Contents", "MacOS")
+	resTools := filepath.Join(root, "AnyDLNA.app", "Contents", "Resources", "tools")
+	if err := os.MkdirAll(macOS, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(macOS, "any_dlna")
+	if got := bundledToolDirFrom(exe); got != "" {
+		t.Fatalf("目录不存在时应返回空，实际 %q", got)
+	}
+	if err := os.MkdirAll(resTools, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got := bundledToolDirFrom(exe)
+	want, _ := filepath.EvalSymlinks(resTools)
+	gotEval, _ := filepath.EvalSymlinks(got)
+	if gotEval != want {
+		t.Fatalf("应定位到 Resources/tools: got %q want %q", got, resTools)
+	}
+}
+
+// TestBundledJSRuntimeArgs 无自带目录时不加 flag（开发环境行为不变）。
+func TestBundledJSRuntimeArgs(t *testing.T) {
+	if bundledToolDir() != "" {
+		t.Skip("自带目录存在，跳过缺省断言")
+	}
+	if args := bundledJSRuntimeArgs(); len(args) != 0 {
+		t.Fatalf("无自带 qjs 时不应加参数: %v", args)
+	}
+}

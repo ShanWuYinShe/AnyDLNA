@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -31,6 +32,42 @@ func toolOverrideEnv(name string) string {
 	}
 }
 
+// bundledToolNames 是随包携带的工具名（见 scripts/bundle-tools.sh）。
+var bundledToolNames = map[string]bool{
+	"yt-dlp": true, "ffmpeg": true, "ffprobe": true, "qjs": true,
+}
+
+// bundledToolDir 返回随包工具目录，不存在时返回空串。
+//
+// 打包脚本把 pin 好版本的工具放进应用包（macOS 为
+// <App>.app/Contents/Resources/tools，随可执行文件相对定位）；
+// 开发环境直接 go run/go test 时该目录不存在，自动退化为原有查找逻辑。
+func bundledToolDir() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return bundledToolDirFrom(exe)
+}
+
+// bundledToolDirFrom 按可执行文件位置推导自带工具目录（纯函数，单测覆盖）。
+func bundledToolDirFrom(exe string) string {
+	base := filepath.Dir(exe)
+	candidates := []string{filepath.Join(base, "tools")}
+	if runtime.GOOS == "darwin" {
+		// <App>.app/Contents/MacOS/<bin> → <App>.app/Contents/Resources/tools
+		candidates = append([]string{
+			filepath.Join(base, "..", "Resources", "tools"),
+		}, candidates...)
+	}
+	for _, dir := range candidates {
+		if st, err := os.Stat(dir); err == nil && st.IsDir() {
+			return dir
+		}
+	}
+	return ""
+}
+
 // ResolveTool 解析外部工具的可执行文件路径。
 //
 // 不能只依赖 exec.LookPath：macOS 上从 Finder / Dock 启动的 GUI 应用
@@ -39,7 +76,8 @@ func toolOverrideEnv(name string) string {
 // 一律找不到——尽管它们在终端里完全可用。
 // 因此这里在 PATH 之外再搜索各平台工具的常见安装目录。
 //
-// 查找顺序：环境变量覆盖 > PATH > 常见安装目录。
+// 查找顺序：环境变量覆盖 > 自带目录 > PATH > 常见安装目录。
+// 自带优先于 PATH：自带版本构建时 pin 好，行为确定，不随用户环境漂移。
 // 返回 ok=false 时，path 为空。
 func ResolveTool(name string) (path string, ok bool) {
 	if env := toolOverrideEnv(name); env != "" {
@@ -49,6 +87,19 @@ func ResolveTool(name string) (path string, ok bool) {
 			}
 			// 显式指定但不可用时不静默回退，交由调用方报错提示。
 			return "", false
+		}
+	}
+	if bundledToolNames[name] {
+		if dir := bundledToolDir(); dir != "" {
+			candidate := filepath.Join(dir, name)
+			if isExecutableFile(candidate) {
+				return candidate, true
+			}
+			if executableSuffix != "" {
+				if candidate = filepath.Join(dir, name+executableSuffix); isExecutableFile(candidate) {
+					return candidate, true
+				}
+			}
 		}
 	}
 	if p, err := exec.LookPath(name); err == nil {
@@ -134,9 +185,15 @@ func ToolEnv() []string {
 }
 
 // existingToolDirs 返回真实存在的工具安装目录（已去重）。
+// 自带目录排最前：yt-dlp 自行调用 ffmpeg / qjs 时优先用自带版本，
+// 与应用主进程的解析结果一致，不混用用户环境里的不同版本。
 func existingToolDirs() []string {
 	var out []string
 	seen := map[string]bool{}
+	if dir := bundledToolDir(); dir != "" {
+		out = append(out, dir)
+		seen[dir] = true
+	}
 	for _, dir := range toolSearchDirs() {
 		if dir == "" || seen[dir] {
 			continue

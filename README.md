@@ -15,19 +15,22 @@
 ## 环境依赖
 
 - Go ≥ 1.25、[Wails CLI v2](https://wails.io/docs/gettingstarted/installation)（`go install github.com/wailsapp/wails/v2/cmd/wails@latest`）
-- `ffmpeg` / `ffprobe`（macOS：`brew install ffmpeg`）。未安装时仅支持直出格式，其余格式会提示。
-- `yt-dlp`（macOS：`brew install yt-dlp`）。在线视频投屏必需；建议定期升级（`brew upgrade yt-dlp`）以跟进各站点变化。
+- 发布版 `.app` 自带 pin 好版本的 `yt-dlp` / `ffmpeg` / `ffprobe` / `qjs`（见 `scripts/bundle-tools.sh`），用户侧零安装；用 `./scripts/build-app.sh` 一键构建自带版。
+- 二次开发与跑单测仍需本机工具（macOS：`brew install ffmpeg yt-dlp quickjs`），因为 `go test` 直接调系统里的二进制。在线视频解析建议定期升级 `yt-dlp`（`brew upgrade yt-dlp`）以跟进各站点变化。
 - 若使用「用应用登录浏览器」，需要本机安装 Chrome / Edge / Brave 等 Chromium 系浏览器之一（应用会自动检测；可用 `ANYDLNA_BROWSER_PATH` 指定可执行文件路径）。
 
 ### 为什么需要 yt-dlp，以及它如何被找到
 
 在线视频解析依赖 yt-dlp，而它**不是可以用 Go 平替的依赖**：yt-dlp 的价值在于内置 1700 多个站点解析器（官方支持列表当前共 1731 条），并持续跟进各站点的反爬变化（YouTube 的签名解密、PO token、SABR 等）。Go 生态中的同类库覆盖面小得多（例如 `kkdai/youtube` 仅支持 YouTube，`iawia002/lux` 支持约 46 个站点），且需要自行跟进同样频繁的站点变更；[`lrstanley/go-ytdlp`](https://github.com/lrstanley/go-ytdlp) 则只是 yt-dlp 的 CLI 绑定，仍然需要该二进制。因此这里把 yt-dlp 当作外部解析引擎使用。
 
-工具的查找方式（`yt-dlp` / `ffmpeg` / `ffprobe` 一致）：
+工具的查找方式（`yt-dlp` / `ffmpeg` / `ffprobe` / `qjs` 一致）：
 
 1. 环境变量显式指定：`ANYDLNA_YTDLP_PATH` / `ANYDLNA_FFMPEG_PATH` / `ANYDLNA_FFPROBE_PATH`；
-2. 系统 `PATH`；
-3. 各平台常见安装目录——macOS 覆盖 Homebrew（`/opt/homebrew/bin`、`/usr/local/bin`）、MacPorts 与用户级目录，Linux 覆盖 `/usr/local/bin`、`/snap/bin`、Flatpak 与 `~/.local/bin`。
+2. 应用自带的 `Contents/Resources/tools`（发布版；版本构建时 pin 好，行为确定，不随用户环境漂移）；
+3. 系统 `PATH`；
+4. 各平台常见安装目录——macOS 覆盖 Homebrew（`/opt/homebrew/bin`、`/usr/local/bin`）、MacPorts 与用户级目录，Linux 覆盖 `/usr/local/bin`、`/snap/bin`、Flatpak 与 `~/.local/bin`。
+
+另外 yt-dlp 解 YouTube JS challenge 需要 JS 运行时：自带 `qjs`（2.6MB）并显式启用（`deno` 仍优先，有则行为不变），干净机器也能解。
 
 第 3 步是必需的，而非锦上添花：**从 Finder / Dock 启动的 macOS 应用不继承 shell 的 PATH**（`launchctl` 默认也未设置），进程实际只有 `/usr/bin:/bin:/usr/sbin:/sbin`。只查 `PATH` 会让 Homebrew 安装的工具一律「未找到」——尽管它们在终端里完全可用。
 
