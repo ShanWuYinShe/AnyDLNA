@@ -4,13 +4,10 @@ package media
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"path/filepath"
 	"strings"
 )
 
-// Info 是 ffprobe 提取的媒体关键信息。
+// Info 是本地文件探测得到的媒体关键信息。
 type Info struct {
 	// Path 是媒体文件路径（仅本地文件有值）。
 	Path        string  `json:"path"`
@@ -32,77 +29,18 @@ type Info struct {
 	FastStart bool `json:"fast_start"`
 }
 
-// HasFFmpeg 报告 ffmpeg/ffprobe 是否可用（含常见安装目录，见 ResolveTool）。
+// HasFFmpeg 报告 ffmpeg 是否可用（含自带目录与常见安装目录，见 ResolveTool）。
+// 本地换封装与转码都需要它；文件探测已是 Go 原生，不再需要 ffprobe。
 func HasFFmpeg() bool {
-	_, ok := ResolveTool("ffprobe")
+	_, ok := ResolveTool("ffmpeg")
 	return ok
 }
 
-// Probe 用 ffprobe 探测媒体文件。
-func Probe(ctx context.Context, path string) (*Info, error) {
-	if !HasFFmpeg() {
-		return nil, MissingToolError("ffprobe")
-	}
-	cmd := toolCmdContext(ctx, "ffprobe",
-		"-v", "error",
-		"-print_format", "json",
-		"-show_format", "-show_streams",
-		path,
-	)
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("探测媒体失败（文件损坏或格式不支持）: %w", err)
-	}
-
-	var raw struct {
-		Streams []struct {
-			CodecType string `json:"codec_type"`
-			CodecName string `json:"codec_name"`
-			Width     int    `json:"width"`
-			Height    int    `json:"height"`
-			PixFmt    string `json:"pix_fmt"`
-		} `json:"streams"`
-		Format struct {
-			FormatName string `json:"format_name"`
-			Duration   string `json:"duration"`
-			Size       string `json:"size"`
-		} `json:"format"`
-	}
-	if err := json.Unmarshal(out, &raw); err != nil {
-		return nil, fmt.Errorf("解析 ffprobe 输出失败: %w", err)
-	}
-
-	info := &Info{
-		Path:      path,
-		Container: raw.Format.FormatName,
-		Title:     strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)),
-		// 默认视为可流式；仅 MP4/MOV 需要实际检查索引位置。
-		FastStart: true,
-	}
-	fmt.Sscanf(raw.Format.Duration, "%f", &info.DurationSec)
-	fmt.Sscanf(raw.Format.Size, "%d", &info.SizeBytes)
-	if isMP4Container(info.Container) {
-		if fast, err := IsFastStart(path); err == nil {
-			info.FastStart = fast
-		} else {
-			// 无法判断时按不可流式处理，避免投出去后电视长时间黑屏。
-			info.FastStart = false
-		}
-	}
-	for _, s := range raw.Streams {
-		switch s.CodecType {
-		case "video":
-			if info.VideoCodec == "" {
-				info.VideoCodec, info.Width, info.Height = s.CodecName, s.Width, s.Height
-				info.PixFmt = s.PixFmt
-			}
-		case "audio":
-			if info.AudioCodec == "" {
-				info.AudioCodec = s.CodecName
-			}
-		}
-	}
-	return info, nil
+// Probe 用 Go 原生解析探测本地媒体文件（MP4/MOV 与 MKV/WebM），
+// 不再依赖 ffprobe。未知容器返回无编码的保守结果（调用方判为转码），
+// 文件不可读才返回错误。
+func Probe(_ context.Context, path string) (*Info, error) {
+	return goProbeFile(path)
 }
 
 // OutputMode 描述一路投屏流的输出方式。

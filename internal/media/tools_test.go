@@ -162,6 +162,7 @@ func TestResolveToolUnknownName(t *testing.T) {
 
 // TestToolStatusReportsEachTool 确认启动自检会逐个报告三个工具的解析结果，
 // 且未找到时明确标注，而不是留空让人误以为没问题。
+// 三件套是实际使用的 yt-dlp/ffmpeg/qjs（ffprobe 已被 Go 探测替代）。
 func TestToolStatusReportsEachTool(t *testing.T) {
 	t.Setenv("PATH", minimalGUIPath)
 	t.Setenv(envYtDlpPath, "")
@@ -171,7 +172,7 @@ func TestToolStatusReportsEachTool(t *testing.T) {
 	got := ToolStatus()
 	t.Logf("启动自检输出: %s", got)
 
-	for _, name := range []string{"yt-dlp", "ffmpeg", "ffprobe"} {
+	for _, name := range []string{"yt-dlp", "ffmpeg", "qjs"} {
 		if !strings.Contains(got, name+"=") {
 			t.Errorf("应包含 %s 的解析结果: %q", name, got)
 		}
@@ -181,7 +182,7 @@ func TestToolStatusReportsEachTool(t *testing.T) {
 		t.Errorf("应恰好报告三个工具，实际 %d 项: %q", n, got)
 	}
 	// 本机装了工具时，应给出路径而不是「未找到」。
-	for _, name := range []string{"yt-dlp", "ffmpeg", "ffprobe"} {
+	for _, name := range []string{"yt-dlp", "ffmpeg", "qjs"} {
 		if _, ok := ResolveTool(name); !ok {
 			continue
 		}

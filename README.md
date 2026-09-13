@@ -7,7 +7,7 @@
 - **设备发现**：SSDP 组播搜索局域网内的 DLNA MediaRenderer（电视、盒子），自动解析设备描述。
 - **在线视频投屏**：粘贴视频页面/流地址，一次 `yt-dlp` 调用同时拿到元数据与直链；下载、并发、定位、代理全由 Go 原生传输层完成（并发 Range 拉取 + 稀疏缓存 + 本机 Range 服务，http/https 与 socks5 代理都支持），`ffmpeg` 只做合并/remux，经本机中转给电视——电视端不需要支持该网站，也不受 DASH 分离流限制。支持 YouTube、Bilibili 等数千个站点与 m3u8/mp4 直链（部分站点 CDN 拒绝非浏览器客户端，自动改由 yt-dlp 下载经管道中转；直播 m3u8 由 `ffmpeg` 直连）。
 - **优先免转码**：投屏前先查询设备声明支持的格式，能直出就直出、能换封装就不转码，画质无损且几乎不占 CPU；源编码确实不被支持时才转码。详见「播放性能」。
-- **本地视频**：`ffprobe` 探测编码；设备声明支持该格式且索引前置的 MP4 原文件直出（带 Range，支持拖动进度）；其他 H.264 内容换封装；HEVC/AV1/10-bit 等设备无法解码的格式才实时转码。
+- **本地视频**：Go 原生探测编码（MP4/MOV/MKV/WebM，无需外部工具）；设备声明支持该格式且索引前置的 MP4 原文件直出（带 Range，支持拖动进度）；其他 H.264 内容换封装；HEVC/AV1/10-bit 等设备无法解码的格式才实时转码。
 - **播放控制**：播放 / 暂停 / 停止、进度跳转（在线模式跳转时复用同一缓存、按需优先拉取跳转位置，无需重新解析；转码模式跳转时转码进程从新位置重启）、音量调节（RenderingControl）。
 - **流服务**：应用内置 HTTP 服务监听局域网可达地址，电视端通过 `SetAVTransportURI` 拉取本机流。
 - **设置页**：代理（跟随系统 / 手动 / 直连）与站点登录状态（读取本机浏览器 / 应用登录浏览器 / 不使用）集中管理，见下文。
@@ -15,7 +15,7 @@
 ## 环境依赖
 
 - Go ≥ 1.25、[Wails CLI v2](https://wails.io/docs/gettingstarted/installation)（`go install github.com/wailsapp/wails/v2/cmd/wails@latest`）
-- 发布版 `.app` 自带 pin 好版本的 `yt-dlp` / `ffmpeg` / `ffprobe` / `qjs`（见 `scripts/bundle-tools.sh`），用户侧零安装；用 `./scripts/build-app.sh` 一键构建自带版。
+- 发布版 `.app` 自带 pin 好版本的 `yt-dlp` / `ffmpeg` / `qjs`（见 `scripts/bundle-tools.sh`），用户侧零安装；用 `./scripts/build-app.sh` 一键构建自带版。
 - 二次开发与跑单测仍需本机工具（macOS：`brew install ffmpeg yt-dlp quickjs`），因为 `go test` 直接调系统里的二进制。在线视频解析建议定期升级 `yt-dlp`（`brew upgrade yt-dlp`）以跟进各站点变化。
 - 若使用「用应用登录浏览器」，需要本机安装 Chrome / Edge / Brave 等 Chromium 系浏览器之一（应用会自动检测；可用 `ANYDLNA_BROWSER_PATH` 指定可执行文件路径）。
 
@@ -23,7 +23,7 @@
 
 在线视频解析依赖 yt-dlp，而它**不是可以用 Go 平替的依赖**：yt-dlp 的价值在于内置 1700 多个站点解析器（官方支持列表当前共 1731 条），并持续跟进各站点的反爬变化（YouTube 的签名解密、PO token、SABR 等）。Go 生态中的同类库覆盖面小得多（例如 `kkdai/youtube` 仅支持 YouTube，`iawia002/lux` 支持约 46 个站点），且需要自行跟进同样频繁的站点变更；[`lrstanley/go-ytdlp`](https://github.com/lrstanley/go-ytdlp) 则只是 yt-dlp 的 CLI 绑定，仍然需要该二进制。因此这里把 yt-dlp 当作外部解析引擎使用。
 
-工具的查找方式（`yt-dlp` / `ffmpeg` / `ffprobe` / `qjs` 一致）：
+工具的查找方式（`yt-dlp` / `ffmpeg` / `qjs` 一致）：
 
 1. 环境变量显式指定：`ANYDLNA_YTDLP_PATH` / `ANYDLNA_FFMPEG_PATH` / `ANYDLNA_FFPROBE_PATH`；
 2. 应用自带的 `Contents/Resources/tools`（发布版；版本构建时 pin 好，行为确定，不随用户环境漂移）；
@@ -142,7 +142,7 @@ main.go                  # Wails 入口
 app.go                   # 绑定给前端的业务层（搜索/选择/解析/投屏/控制/轮询/设置）
 internal/dlna/           # SSDP 发现、设备描述解析、AVTransport/RenderingControl SOAP 控制、
                          # ConnectionManager 格式协商（GetProtocolInfo 解析与 MIME 归一化）
-internal/media/          # 外部工具定位（含 GUI PATH 兼容）、ffprobe 探测（含 MP4 faststart 检测）、
+internal/media/          # 外部工具定位（含 GUI PATH 兼容）、Go 原生文件探测（含 MP4 faststart 检测）、
                          # 输出方式决策（直出/换封装/转码）、yt-dlp 在线源解析、
                          # ffmpeg 实时处理、局域网 HTTP 流服务、
                          # 配置持久化、代理探测（分平台）、Netscape Cookies 文件读写
@@ -168,7 +168,7 @@ frontend/src/            # 原生 HTML/JS/CSS 界面（投屏主页 + 设置页�
 go test ./...
 # 竞态检测（推荐在改并发相关代码后执行）：
 go test -race ./...
-# ffprobe 集成测试（需提供真实媒体文件）：
+# 探测集成测试（需提供真实媒体文件，与系统 ffprobe 对照）：
 ANYDLNA_PROBE_SAMPLE=/path/to/video.mp4 go test ./internal/media/ -run TestProbeIntegration -v
 # 在线流全链路集成测试（本地 HTTP → yt-dlp → ffmpeg → MPEG-TS，需安装 yt-dlp/ffmpeg）：
 ANYDLNA_STREAM_ITEST=1 ANYDLNA_STREAM_SAMPLE_DIR=/目录 go test ./internal/media/ -run TestURLStreamIntegration -v

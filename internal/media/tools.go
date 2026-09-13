@@ -34,7 +34,7 @@ func toolOverrideEnv(name string) string {
 
 // bundledToolNames 是随包携带的工具名（见 scripts/bundle-tools.sh）。
 var bundledToolNames = map[string]bool{
-	"yt-dlp": true, "ffmpeg": true, "ffprobe": true, "qjs": true,
+	"yt-dlp": true, "ffmpeg": true, "qjs": true,
 }
 
 // bundledToolDir 返回随包工具目录，不存在时返回空串。
@@ -213,7 +213,7 @@ func existingToolDirs() []string {
 // 启动日志直接给出每个工具的最终路径（或「未找到」），可一眼定位。
 func ToolStatus() string {
 	parts := make([]string, 0, 3)
-	for _, name := range []string{"yt-dlp", "ffmpeg", "ffprobe"} {
+	for _, name := range []string{"yt-dlp", "ffmpeg", "qjs"} {
 		if p, ok := ResolveTool(name); ok {
 			parts = append(parts, name+"="+p)
 		} else {
@@ -224,7 +224,7 @@ func ToolStatus() string {
 }
 
 // MissingToolError 返回外部工具缺失时的可操作错误。
-// name 取 "yt-dlp" / "ffmpeg" / "ffprobe"。
+// name 取 "yt-dlp" / "ffmpeg" / "qjs"。
 //
 // 提示中会说明已搜索的位置——GUI 应用找不到工具通常不是「没装」，
 // 而是没有继承 shell 的 PATH，明确列出搜索范围能避免用户误判。

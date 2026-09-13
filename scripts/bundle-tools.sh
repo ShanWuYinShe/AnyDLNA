@@ -76,14 +76,14 @@ if [ ! -x "$TOOLS/yt-dlp" ]; then
 fi
 "$TOOLS/yt-dlp" --version
 
-# ---- ffmpeg / ffprobe：osxexperts arm64 静态构建。
+# ---- ffmpeg：osxexperts arm64 静态构建（含 libx264/aac，转码必需）。
+# ffprobe 已不需要：本地探测是 Go 原生（见 internal/media/goprobe.go）。
 # 只支持 arm64（evermeet 只有 x86_64 实测弃用；Intel Mac 不再维护）。
 if [ "$ARCH" != "arm64" ]; then
 	echo "仅支持 arm64 打包，当前 $ARCH" >&2
 	exit 1
 fi
 FFMPEG_URL="https://www.osxexperts.net/ffmpeg9arm.zip"
-FFPROBE_URL="https://www.osxexperts.net/ffprobe9arm.zip"
 # cached_zip <file>：缓存包完好时跳过下载。
 cached_zip() {
 	[ -f "$1" ] && unzip -t -q "$1" >/dev/null 2>&1
@@ -95,15 +95,7 @@ if [ ! -x "$TOOLS/ffmpeg" ]; then
 	cp ffmpeg-ex/ffmpeg "$TOOLS/ffmpeg"
 	chmod +x "$TOOLS/ffmpeg"
 fi
-if [ ! -x "$TOOLS/ffprobe" ]; then
-	echo "-- ffprobe ($ARCH) $FFPROBE_URL"
-	fetch_big "$FFPROBE_URL" ffprobe.zip
-	unzip -o -q ffprobe.zip -d ffprobe-ex
-	cp ffprobe-ex/ffprobe "$TOOLS/ffprobe"
-	chmod +x "$TOOLS/ffprobe"
-fi
 "$TOOLS/ffmpeg" -version 2>/dev/null | head -n 1
-"$TOOLS/ffprobe" -version 2>/dev/null | head -n 1
 
 # ---- qjs：quickjs 源码构建（仅 libSystem 依赖，约 1MB，解 JS challenge 用） ----
 if [ ! -x "$TOOLS/qjs" ]; then
@@ -117,5 +109,8 @@ if [ ! -x "$TOOLS/qjs" ]; then
 	chmod +x "$TOOLS/qjs"
 fi
 "$TOOLS/qjs" --help 2>&1 | head -n 1
+
+# 迁移清理：ffprobe 已被 Go 原生探测替代，旧包残留的删掉（省 51MB）。
+rm -f "$TOOLS/ffprobe"
 
 echo "== 自带工具就绪：$(ls "$TOOLS")"
