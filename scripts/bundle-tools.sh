@@ -17,10 +17,18 @@ case "$APP" in
 *) APP="$(pwd)/$APP" ;;
 esac
 TOOLS="$APP/Contents/Resources/tools"
-CACHE="${CACHE_DIR:-.workwork/toolcache}"
+# 锚定仓库根（脚本可在任意 cwd 调用），避免缓存目录随调用位置漂移
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CACHE="${CACHE_DIR:-$ROOT/.workwork/toolcache}"
 ARCH="$(uname -m)"
 
 echo "== bundle-tools: $APP (arch=$ARCH)"
+# 架构检查必须在任何拷贝/下载落盘之前：ffmpeg 只支持 arm64，晚检查会在
+# 已塞入 yt-dlp 的 .app 上中止（set -e），留下签名失效的半成品。
+if [ "$ARCH" != "arm64" ]; then
+	echo "仅支持 arm64 打包，当前 $ARCH" >&2
+	exit 1
+fi
 mkdir -p "$TOOLS" "$CACHE"
 cd "$CACHE"
 
@@ -78,11 +86,8 @@ fi
 
 # ---- ffmpeg：osxexperts arm64 静态构建（含 libx264/aac，转码必需）。
 # ffprobe 已不需要：本地探测是 Go 原生（见 internal/media/goprobe.go）。
-# 只支持 arm64（evermeet 只有 x86_64 实测弃用；Intel Mac 不再维护）。
-if [ "$ARCH" != "arm64" ]; then
-	echo "仅支持 arm64 打包，当前 $ARCH" >&2
-	exit 1
-fi
+# 只支持 arm64（evermeet 只有 x86_64 实测弃用；Intel Mac 不再维护），
+# 检查已前移至脚本开头。
 FFMPEG_URL="https://www.osxexperts.net/ffmpeg9arm.zip"
 # cached_zip <file>：缓存包完好时跳过下载。
 cached_zip() {

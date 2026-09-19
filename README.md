@@ -16,6 +16,9 @@
 
 - Go ≥ 1.25、[Wails CLI v2](https://wails.io/docs/gettingstarted/installation)（`go install github.com/wailsapp/wails/v2/cmd/wails@latest`）
 - 发布版 `.app` 自带 pin 好版本的 `yt-dlp` / `ffmpeg` / `qjs`（见 `scripts/bundle-tools.sh`），用户侧零安装；用 `./scripts/build-app.sh` 一键构建自带版。
+- **分发注意**：`build-app.sh` 产物是 adhoc 签名，仅本机可用；拷给他人会被
+  Gatekeeper 拦截。对外分发需 Developer ID 签名 + 公证（需要 Apple Developer
+  账号，见 `scripts/build-app.sh` 注释）。
 - 二次开发与跑单测仍需本机工具（macOS：`brew install ffmpeg yt-dlp quickjs`），因为 `go test` 直接调系统里的二进制。在线视频解析建议定期升级 `yt-dlp`（`brew upgrade yt-dlp`）以跟进各站点变化。
 - 若使用「用应用登录浏览器」，需要本机安装 Chrome / Edge / Brave 等 Chromium 系浏览器之一（应用会自动检测；可用 `ANYDLNA_BROWSER_PATH` 指定可执行文件路径）。
 
@@ -148,6 +151,7 @@ internal/media/          # 外部工具定位（含 GUI PATH 兼容）、Go 原�
                          # 配置持久化、代理探测（分平台）、Netscape Cookies 文件读写
 internal/browser/        # 纯 Go 的浏览器自动化（CDP）：启动独立 profile 的浏览器并读回 Cookies
 internal/netutil/        # 本机局域网地址探测
+cmd/faketv/              # 模拟 DLNA 电视 CLI（media E2E 与手动试用，见 internal/media）
 frontend/src/            # 原生 HTML/JS/CSS 界面（投屏主页 + 设置页）
 ```
 
@@ -174,6 +178,8 @@ ANYDLNA_PROBE_SAMPLE=/path/to/video.mp4 go test ./internal/media/ -run TestProbe
 ANYDLNA_STREAM_ITEST=1 ANYDLNA_STREAM_SAMPLE_DIR=/目录 go test ./internal/media/ -run TestURLStreamIntegration -v
 # 浏览器 Cookie 集成测试（会真实启动一个浏览器进程，使用临时 profile）：
 ANYDLNA_BROWSER_ITEST=1 go test ./internal/browser/ -run TestManagerCookiesIntegration -v
+# 组播发现集成测试（依赖局域网组播环境，多接口/AP 隔离机器上不可靠）：
+ANYDLNA_FAKETV_DISCOVER=1 go test ./internal/faketv/ -run TestDiscoverFindsFakeTV -v
 # 设备格式协商集成测试（需局域网内有可访问的 DLNA 设备）：
 ANYDLNA_TV_HOST=192.168.1.100 go test ./internal/dlna/ -run TestRealDeviceProtocolInfoIntegration -v
 ANYDLNA_TV_HOST=192.168.1.100 go test . -run TestNegotiationEndToEnd -v
