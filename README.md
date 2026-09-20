@@ -19,7 +19,7 @@
 - **分发注意**：`build-app.sh` 产物是 adhoc 签名，仅本机可用；拷给他人会被
   Gatekeeper 拦截。对外分发需 Developer ID 签名 + 公证（需要 Apple Developer
   账号，见 `scripts/build-app.sh` 注释）。
-- 二次开发与跑单测仍需本机工具（macOS：`brew install ffmpeg yt-dlp quickjs`），因为 `go test` 直接调系统里的二进制。在线视频解析建议定期升级 `yt-dlp`（`brew upgrade yt-dlp`）以跟进各站点变化。
+- 二次开发：默认测试套件无需外部工具（依赖二进制的用例在缺失时自动 skip），仅集成测试需要本机工具（macOS：`brew install ffmpeg yt-dlp quickjs`，见「测试」）。在线视频解析建议定期升级 `yt-dlp`（`brew upgrade yt-dlp`）以跟进各站点变化。
 - 若使用「用应用登录浏览器」，需要本机安装 Chrome / Edge / Brave 等 Chromium 系浏览器之一（应用会自动检测；可用 `ANYDLNA_BROWSER_PATH` 指定可执行文件路径）。
 
 ### 为什么需要 yt-dlp，以及它如何被找到
@@ -169,9 +169,14 @@ frontend/src/            # 原生 HTML/JS/CSS 界面（投屏主页 + 设置页�
 ## 测试
 
 ```bash
+# 日常入口：vet + 全量 go test（默认套件无需外部工具，集成用例自动 skip）：
+./scripts/test.sh
+# 同上并启用竞态检测（推荐在改并发相关代码后执行）：
+RACE=1 ./scripts/test.sh
+# 等价的基础命令：
+go vet ./...
 go test ./...
-# 竞态检测（推荐在改并发相关代码后执行）：
-go test -race ./...
+gofmt -l .        # 无输出即格式通过
 # 探测集成测试（需提供真实媒体文件，与系统 ffprobe 对照）：
 ANYDLNA_PROBE_SAMPLE=/path/to/video.mp4 go test ./internal/media/ -run TestProbeIntegration -v
 # 在线流全链路集成测试（本地 HTTP → yt-dlp → ffmpeg → MPEG-TS，需安装 yt-dlp/ffmpeg）：
