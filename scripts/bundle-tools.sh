@@ -2,11 +2,16 @@
 # 把 pin 好版本的外部工具打进 .app，供 ResolveTool 自带目录优先查找。
 # 用法：./scripts/bundle-tools.sh [AnyDLNA.app 路径，默认 build/bin/AnyDLNA.app]
 # 失败即停（set -e），任一步 download 失败都不要产出半成品包。
+# 下载物均经 sha256 pin 校验（供应链防护）：升级版本必须同步更新哈希。
 set -eu
 
 # ---- 版本 pin（升级工具只改这里；ffmpeg 按架构分开 pin，见下） ----
 YTDLP_VERSION="${YTDLP_VERSION:-2026.08.19}"
+# 对应 yt-dlp_macos（github release）的 sha256，与版本一起 pin。
+YTDLP_SHA256="${YTDLP_SHA256:-0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202}"
 QUICKJS_VERSION="${QUICKJS_VERSION:-2026-06-04}"
+# 对应 quickjs-${QUICKJS_VERSION}.tar.xz（bellard.org）的 sha256。
+QUICKJS_SHA256="${QUICKJS_SHA256:-b376e839b322978313d929fd20663b11ba58b75df5a46c126dd19ea2fa70ad2a}"
 # quickjs 官方只发源码包，构建机需有 make 与 clang（Xcode CLT 即可）。
 QUICKJS_URL="https://bellard.org/quickjs/quickjs-${QUICKJS_VERSION}.tar.xz"
 
@@ -34,6 +39,19 @@ cd "$CACHE"
 
 fetch() { # fetch <url> <output>
 	curl -sSL --retry 5 --retry-all-errors --max-time 1200 -o "$2" "$1"
+}
+
+# expect_sha256 <file> <期望哈希>：下载物哈希不符立即报错退出，
+# 不产出半成品包（防 CDN 投毒与传输损坏）。
+expect_sha256() {
+	file="$1"; expect="$2"
+	got="$(shasum -a 256 "$file" | awk '{print $1}')"
+	if [ "$got" != "$expect" ]; then
+		echo "sha256 校验失败：$file" >&2
+		echo "  期望 $expect" >&2
+		echo "  实得 $got" >&2
+		exit 1
+	fi
 }
 
 # fetch_big <url> <output>：8 路 Range 并行下载后拼接。
@@ -79,6 +97,7 @@ fetch_big() {
 if [ ! -x "$TOOLS/yt-dlp" ]; then
 	echo "-- yt-dlp $YTDLP_VERSION"
 	fetch "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp_macos" yt-dlp
+	expect_sha256 yt-dlp "$YTDLP_SHA256"
 	chmod +x yt-dlp
 	cp yt-dlp "$TOOLS/yt-dlp"
 fi
@@ -89,6 +108,9 @@ fi
 # 只支持 arm64（evermeet 只有 x86_64 实测弃用；Intel Mac 不再维护），
 # 检查已前移至脚本开头。
 FFMPEG_URL="https://www.osxexperts.net/ffmpeg9arm.zip"
+# 该 zip 无版本号（URL 恒定、内容随官方更新），哈希 pin 的是当前快照；
+# 官方换包后此处会校验失败，需重新核对并更新。
+FFMPEG_SHA256="${FFMPEG_SHA256:-d0c06c5c68ce48af3143b262f7a9118a7c9f67de1e237fcc24ffb14df9c67af9}"
 # cached_zip <file>：缓存包完好时跳过下载。
 cached_zip() {
 	[ -f "$1" ] && unzip -t -q "$1" >/dev/null 2>&1
@@ -96,6 +118,7 @@ cached_zip() {
 if [ ! -x "$TOOLS/ffmpeg" ]; then
 	echo "-- ffmpeg ($ARCH) $FFMPEG_URL"
 	fetch_big "$FFMPEG_URL" ffmpeg.zip
+	expect_sha256 ffmpeg.zip "$FFMPEG_SHA256"
 	unzip -o -q ffmpeg.zip -d ffmpeg-ex
 	cp ffmpeg-ex/ffmpeg "$TOOLS/ffmpeg"
 	chmod +x "$TOOLS/ffmpeg"
@@ -106,6 +129,7 @@ fi
 if [ ! -x "$TOOLS/qjs" ]; then
 	echo "-- qjs $QUICKJS_VERSION (源码构建)"
 	fetch "$QUICKJS_URL" quickjs.tar.xz
+	expect_sha256 quickjs.tar.xz "$QUICKJS_SHA256"
 	rm -rf "quickjs-${QUICKJS_VERSION}"
 	tar xf quickjs.tar.xz
 	(cd "quickjs-${QUICKJS_VERSION}" && make qjs -j"$(sysctl -n hw.ncpu)")
