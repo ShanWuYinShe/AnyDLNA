@@ -3,6 +3,9 @@
   "name": "AnyDLNA",
   "outputfilename": "any_dlna",
   "wailsjsdir": "./frontend",
+  "info": {
+    "productVersion": "1.1.0"
+  },
   "author": {
     "name": "winliyou",
     "email": "winliyou@outlook.com"

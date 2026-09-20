@@ -1,0 +1,43 @@
+# 单 job CI：格式 → 静态检查 → 测试（含竞态检测）→ 三平台交叉编译校验。
+# 不含 wails build（图形产物需各平台 WebView 工具链，另行发布流程处理）。
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7.0.1
+
+      - name: 安装 Go（版本取自 go.mod）
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt 检查（有未格式化文件即失败）
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then
+            echo "::error::以下文件未通过 gofmt："
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test（含 -race；集成用例无环境变量时自动跳过）
+        run: go test -race ./...
+
+      # 等价于 GOOS 三平台矩阵：核心逻辑无 cgo，三平台交叉编译均应通过。
+      - name: 交叉编译校验（darwin / windows / linux）
+        run: |
+          for goos in darwin windows linux; do
+            echo "== GOOS=$goos =="
+            GOOS="$goos" go build ./...
+          done
