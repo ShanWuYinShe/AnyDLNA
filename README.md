@@ -14,11 +14,11 @@
 
 ## 环境依赖
 
-- Go ≥ 1.25、[Wails CLI v2](https://wails.io/docs/gettingstarted/installation)（`go install github.com/wailsapp/wails/v2/cmd/wails@latest`）
+- Go ≥ 1.25、[Wails CLI v2](https://wails.io/docs/gettingstarted/installation)（CLI 与 wails 库同模块同版本，建议 pin 到 go.mod 中 `wails/v2` 的版本：`go install github.com/wailsapp/wails/v2/cmd/wails@v2.15.0`，升级 go.mod 时同步更新此处）
 - 发布版 `.app` 自带 pin 好版本的 `yt-dlp` / `ffmpeg` / `qjs`（见 `scripts/bundle-tools.sh`），用户侧零安装；用 `./scripts/build-app.sh` 一键构建自带版。
 - **分发注意**：`build-app.sh` 产物是 adhoc 签名，仅本机可用；拷给他人会被
   Gatekeeper 拦截。对外分发需 Developer ID 签名 + 公证（需要 Apple Developer
-  账号，见 `scripts/build-app.sh` 注释）。
+  账号，手动流程见 `RELEASE.md`）。
 - 二次开发：默认测试套件无需外部工具（依赖二进制的用例在缺失时自动 skip），仅集成测试需要本机工具（macOS：`brew install ffmpeg yt-dlp quickjs`，见「测试」）。在线视频解析建议定期升级 `yt-dlp`（`brew upgrade yt-dlp`）以跟进各站点变化。
 - 若使用「用应用登录浏览器」，需要本机安装 Chrome / Edge / Brave 等 Chromium 系浏览器之一（应用会自动检测；可用 `ANYDLNA_BROWSER_PATH` 指定可执行文件路径）。
 
