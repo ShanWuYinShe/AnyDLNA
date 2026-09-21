@@ -3,6 +3,10 @@
 # 用法：./scripts/bundle-tools.sh [AnyDLNA.app 路径，默认 build/bin/AnyDLNA.app]
 # 失败即停（set -e），任一步 download 失败都不要产出半成品包。
 # 下载物均经 sha256 pin 校验（供应链防护）：升级版本必须同步更新哈希。
+# 各工具的版本 / URL / 哈希均可用同名环境变量覆盖（YTDLP_VERSION /
+# YTDLP_SHA256 / FFMPEG_URL / FFMPEG_SHA256 / QUICKJS_VERSION /
+# QUICKJS_SHA256），便于本机换源或临时重打；覆盖版本或 URL 时必须同步覆盖
+# 对应哈希，否则 sha256 校验会拒绝下载物。
 set -eu
 
 # ---- 版本 pin（升级工具只改这里；ffmpeg 按架构分开 pin，见下） ----
@@ -107,9 +111,10 @@ fi
 # ffprobe 已不需要：本地探测是 Go 原生（见 internal/media/goprobe.go）。
 # 只支持 arm64（evermeet 只有 x86_64 实测弃用；Intel Mac 不再维护），
 # 检查已前移至脚本开头。
-FFMPEG_URL="https://www.osxexperts.net/ffmpeg9arm.zip"
-# 该 zip 无版本号（URL 恒定、内容随官方更新），哈希 pin 的是当前快照；
-# 官方换包后此处会校验失败，需重新核对并更新。
+# URL 与哈希一样可用环境变量覆盖（写法对齐上方 FFMPEG_SHA256）。该 zip 无
+# 版本号（URL 恒定、内容随官方更新），哈希 pin 的是当前快照；官方换包后
+# 此处会校验失败，需重新核对并更新。
+FFMPEG_URL="${FFMPEG_URL:-https://www.osxexperts.net/ffmpeg9arm.zip}"
 FFMPEG_SHA256="${FFMPEG_SHA256:-d0c06c5c68ce48af3143b262f7a9118a7c9f67de1e237fcc24ffb14df9c67af9}"
 # cached_zip <file>：缓存包完好时跳过下载。
 cached_zip() {
