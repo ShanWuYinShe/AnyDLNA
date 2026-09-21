@@ -31,6 +31,18 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # 清空集成测试环境变量，清单与 scripts/test.sh 的 unset 保持一致：
+      # 防触发环境（如 self-hosted runner）残留变量误触网络型用例，保证
+      # 默认套件离线、可重复。修改变量清单时两处必须同步。
+      - name: 清空集成测试环境变量（与 scripts/test.sh 同步）
+        run: |
+          echo "ANYDLNA_PROBE_SAMPLE=" >> "$GITHUB_ENV"
+          echo "ANYDLNA_TV_HOST=" >> "$GITHUB_ENV"
+          echo "ANYDLNA_STREAM_ITEST=" >> "$GITHUB_ENV"
+          echo "ANYDLNA_STREAM_SAMPLE_DIR=" >> "$GITHUB_ENV"
+          echo "ANYDLNA_BROWSER_ITEST=" >> "$GITHUB_ENV"
+          echo "ANYDLNA_FAKETV_DISCOVER=" >> "$GITHUB_ENV"
+
       - name: go test（含 -race；集成用例无环境变量时自动跳过）
         run: go test -race ./...
 
