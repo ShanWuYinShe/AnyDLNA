@@ -181,6 +181,8 @@ async function loadSettings() {
         $('cookieBrowser').value = cfg.cookieBrowser;
     }
 
+    $('castTitleInput').value = cfg.castTitle || '';
+
     syncProxyRows();
     syncCookieRows();
     // 同时刷新系统代理提示与 Cookies 状态。
@@ -223,6 +225,7 @@ function collectConfig() {
         proxyUrl: $('proxyInput').value.trim(),
         cookieMode: document.querySelector('input[name="cookieMode"]:checked').value,
         cookieBrowser: $('cookieBrowser').value,
+        castTitle: $('castTitleInput').value,
     };
 }
 

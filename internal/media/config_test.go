@@ -44,6 +44,16 @@ func TestConfigNormalize(t *testing.T) {
 			in:   Config{ProxyMode: ProxyModeNone, CookieMode: "bogus", CookieBrowser: "chrome"},
 			want: Config{ProxyMode: ProxyModeNone, CookieMode: CookieModeNone},
 		},
+		{
+			name: "投屏显示名称去首尾空格",
+			in:   Config{ProxyMode: ProxyModeSystem, CookieMode: CookieModeNone, CastTitle: "  xxx 投屏  "},
+			want: Config{ProxyMode: ProxyModeSystem, CookieMode: CookieModeNone, CastTitle: "xxx 投屏"},
+		},
+		{
+			name: "投屏显示名称保留 {title} 占位符",
+			in:   Config{ProxyMode: ProxyModeSystem, CookieMode: CookieModeNone, CastTitle: "{title} · 来自 AnyDLNA"},
+			want: Config{ProxyMode: ProxyModeSystem, CookieMode: CookieModeNone, CastTitle: "{title} · 来自 AnyDLNA"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -160,7 +170,8 @@ func TestSaveConfigRoundTrip(t *testing.T) {
 	t.Setenv("HOME", dir)
 
 	want := Config{ProxyMode: ProxyModeManual, ProxyURL: "http://127.0.0.1:7890",
-		CookieMode: CookieModeBrowser, CookieBrowser: "firefox"}
+		CookieMode: CookieModeBrowser, CookieBrowser: "firefox",
+		CastTitle: "{title} · 来自 AnyDLNA"}
 	if err := SaveConfig(want); err != nil {
 		t.Fatal(err)
 	}

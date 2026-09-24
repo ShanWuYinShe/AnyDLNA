@@ -16,6 +16,32 @@ import (
 	"AnyDLNA/internal/media"
 )
 
+// TestCastDisplayTitle 覆盖投屏显示名称（设置项 castTitle）的三种形态：
+// 未配置保持原标题、固定名称整体生效、{title} 占位符替换为原标题。
+func TestCastDisplayTitle(t *testing.T) {
+	tests := []struct {
+		name       string
+		castTitle  string
+		defaultOne string
+		want       string
+	}{
+		{"未配置时保持原标题", "", "某视频", "某视频"},
+		{"配置只含空格视为未配置", "   ", "某视频", "某视频"},
+		{"固定名称整体生效", "老王的投屏", "某视频", "老王的投屏"},
+		{"占位符替换为原标题", "{title} · 来自 AnyDLNA", "某视频", "某视频 · 来自 AnyDLNA"},
+		{"多个占位符全部替换", "{title}（{title}）", "某视频", "某视频（某视频）"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			app := NewApp()
+			app.cfg = media.Config{CastTitle: tc.castTitle}
+			if got := app.castDisplayTitle(tc.defaultOne); got != tc.want {
+				t.Errorf("castDisplayTitle() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestStopCastDoesNotHoldStateLock 回归测试：投屏状态清理（会等待转码进程退出）
 // 绝不能在持有 a.mu 时进行，否则 StalledCast 期间所有前端 IPC 都会被阻塞。
 func TestStopCastDoesNotHoldStateLock(t *testing.T) {

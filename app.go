@@ -466,14 +466,15 @@ func (a *App) Cast(udn, path string) (*CastStatus, error) {
 		return nil, err
 	}
 	plan := media.PlanForLocal(info, caps)
+	title := a.castDisplayTitle(info.Title)
 
 	var sessionID, mime, mode string
 	switch plan.Mode {
 	case media.OutputDirect:
-		sessionID = srv.AddDirect(path, plan.OutputMIME(), info.Title)
+		sessionID = srv.AddDirect(path, plan.OutputMIME(), title)
 		mime, mode = plan.OutputMIME(), string(plan.Mode)
 	default:
-		sessionID = srv.AddTranscode(path, info.Title, plan)
+		sessionID = srv.AddTranscode(path, title, plan)
 		mime, mode = plan.OutputMIME(), string(plan.Mode)
 	}
 	ip, err := netutil.LANIP()
@@ -482,7 +483,7 @@ func (a *App) Cast(udn, path string) (*CastStatus, error) {
 		return nil, fmt.Errorf("获取本机局域网地址失败: %w", err)
 	}
 	playURL := srv.URL(ip, sessionID, plan.IsDirect())
-	return a.startCast(dev, srv, sessionID, info.Title, playURL, mime, mode, ctx)
+	return a.startCast(dev, srv, sessionID, title, playURL, mime, mode, ctx)
 }
 
 // ResolveURL 解析在线视频页面地址，返回标题、时长等预览信息。
@@ -518,6 +519,19 @@ func (a *App) resolveOptions() media.Options {
 	cfg := a.cfg
 	a.mu.Unlock()
 	return cfg.ResolveOptions()
+}
+
+// castDisplayTitle 计算投屏时下发给电视端显示的标题（DIDL 的 dc:title）。
+// 配置了投屏显示名称时以其为准：内容中的 {title} 占位符替换为实际标题，
+// 不含占位符则整体作为固定名称；未配置时保持原标题。
+func (a *App) castDisplayTitle(defaultTitle string) string {
+	a.mu.Lock()
+	tpl := strings.TrimSpace(a.cfg.CastTitle)
+	a.mu.Unlock()
+	if tpl == "" {
+		return defaultTitle
+	}
+	return strings.ReplaceAll(tpl, "{title}", defaultTitle)
 }
 
 // castTarget 取出投屏目标设备与流服务，校验可用性。
@@ -574,7 +588,8 @@ func (a *App) CastURL(udn, rawURL string) (*CastStatus, error) {
 	media.Diagf("投屏解析 url=%.80s 标题=%.40s 时长=%.0fs 直播=%v 站点=%s 直链=%d条",
 		rawURL, resolved.Title, resolved.DurationSec, resolved.IsLive, resolved.Extractor, len(urls))
 	plan := media.PlanForOnline(resolved.VideoCodec, resolved.AudioCodec, caps)
-	sessionID, err := srv.AddTranscodeURL(ctx, rawURL, resolved.Title, resolved.IsLive, opts, plan, resolved.Extractor, urls)
+	title := a.castDisplayTitle(resolved.Title)
+	sessionID, err := srv.AddTranscodeURL(ctx, rawURL, title, resolved.IsLive, opts, plan, resolved.Extractor, urls)
 	if err != nil {
 		media.Diagf("投屏失败 预热 会话=%s err=%v", sessionID, err)
 		return nil, err
@@ -585,7 +600,7 @@ func (a *App) CastURL(udn, rawURL string) (*CastStatus, error) {
 		return nil, fmt.Errorf("获取本机局域网地址失败: %w", err)
 	}
 	playURL := srv.URL(ip, sessionID, false)
-	status, err := a.startCast(dev, srv, sessionID, resolved.Title, playURL, plan.OutputMIME(), string(plan.Mode), ctx)
+	status, err := a.startCast(dev, srv, sessionID, title, playURL, plan.OutputMIME(), string(plan.Mode), ctx)
 	if err != nil {
 		media.Diagf("投屏失败 下发 设备=%s err=%v", dev.FriendlyName, err)
 		return nil, err

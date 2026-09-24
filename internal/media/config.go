@@ -42,6 +42,9 @@ type Config struct {
 	ProxyURL      string `json:"proxyUrl"`      // manual 模式下的代理地址
 	CookieMode    string `json:"cookieMode"`    // none / loginbrowser / browser
 	CookieBrowser string `json:"cookieBrowser"` // browser 模式下的浏览器名
+	// CastTitle 是投屏时电视端显示的名称模板；空为默认（视频标题/文件名）。
+	// 内容中的 {title} 会被替换为实际标题，如「{title} · 来自 AnyDLNA」。
+	CastTitle string `json:"castTitle"`
 }
 
 // ConfigPath 返回配置文件路径（随系统用户配置目录）。
@@ -99,6 +102,7 @@ func LoadConfig() Config {
 		CookieMode       string `json:"cookieMode"`
 		CookieBrowser    string `json:"cookieBrowser"`
 		LegacyCookieMode string `json:"cookie_mode"`
+		CastTitle        string `json:"castTitle"`
 		// 最早期的字段：只有代理地址与浏览器名。
 		LegacyProxy         string `json:"proxy"`
 		LegacyCookieBrowser string `json:"cookie_browser"`
@@ -121,6 +125,7 @@ func LoadConfig() Config {
 		ProxyURL:      firstNonEmpty(raw.ProxyURL, raw.LegacyProxyURL),
 		CookieMode:    firstNonEmpty(raw.CookieMode, raw.LegacyCookieMode),
 		CookieBrowser: firstNonEmpty(raw.CookieBrowser, raw.LegacyCookieBrowser),
+		CastTitle:     raw.CastTitle,
 	}
 	// 旧格式迁移：原 proxy 字段非空视为手动代理，空则按新默认跟随系统。
 	if c.ProxyMode == "" {
@@ -157,6 +162,7 @@ func (c Config) Normalize() Config {
 	if c.CookieMode != CookieModeBrowser {
 		c.CookieBrowser = ""
 	}
+	c.CastTitle = strings.TrimSpace(c.CastTitle)
 	return c
 }
 
