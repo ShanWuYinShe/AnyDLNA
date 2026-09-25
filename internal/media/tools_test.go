@@ -3,6 +3,7 @@ package media
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -203,7 +204,12 @@ func containsString(list []string, want string) bool {
 }
 
 // TestBundledToolDirFrom 模拟 .app 目录布局，自带目录存在即命中、否则为空。
+// .app 的 Resources/tools 相对定位只在 macOS 打包形态下启用
+// （见 bundledToolDirFrom 的 darwin 分支），其余平台恒为空，属预期行为。
 func TestBundledToolDirFrom(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip(".app 相对定位仅存在于 macOS 打包形态")
+	}
 	root := t.TempDir()
 	macOS := filepath.Join(root, "AnyDLNA.app", "Contents", "MacOS")
 	resTools := filepath.Join(root, "AnyDLNA.app", "Contents", "Resources", "tools")
