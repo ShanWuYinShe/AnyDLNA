@@ -6,12 +6,12 @@ export function AddDeviceManually(arg1) {
   return window['go']['main']['App']['AddDeviceManually'](arg1);
 }
 
-export function Cast(arg1, arg2) {
-  return window['go']['main']['App']['Cast'](arg1, arg2);
+export function Cast(arg1, arg2, arg3) {
+  return window['go']['main']['App']['Cast'](arg1, arg2, arg3);
 }
 
-export function CastURL(arg1, arg2) {
-  return window['go']['main']['App']['CastURL'](arg1, arg2);
+export function CastURL(arg1, arg2, arg3) {
+  return window['go']['main']['App']['CastURL'](arg1, arg2, arg3);
 }
 
 export function ClearCookies() {
@@ -50,8 +50,8 @@ export function LoginBrowserStatus() {
   return window['go']['main']['App']['LoginBrowserStatus']();
 }
 
-export function OpenLoginBrowser(arg1) {
-  return window['go']['main']['App']['OpenLoginBrowser'](arg1);
+export function OpenLoginBrowser(arg1, arg2) {
+  return window['go']['main']['App']['OpenLoginBrowser'](arg1, arg2);
 }
 
 export function PickVideo(arg1) {

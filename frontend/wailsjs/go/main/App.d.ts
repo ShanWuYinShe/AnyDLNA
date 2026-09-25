@@ -5,9 +5,9 @@ import {media} from '../models';
 
 export function AddDeviceManually(arg1:string):Promise<main.DeviceInfo>;
 
-export function Cast(arg1:string,arg2:string):Promise<main.CastStatus>;
+export function Cast(arg1:string,arg2:string,arg3:string):Promise<main.CastStatus>;
 
-export function CastURL(arg1:string,arg2:string):Promise<main.CastStatus>;
+export function CastURL(arg1:string,arg2:string,arg3:string):Promise<main.CastStatus>;
 
 export function ClearCookies():Promise<void>;
 
@@ -27,7 +27,7 @@ export function GetVolume():Promise<number>;
 
 export function LoginBrowserStatus():Promise<main.LoginBrowserInfo>;
 
-export function OpenLoginBrowser(arg1:string):Promise<void>;
+export function OpenLoginBrowser(arg1:string,arg2:string):Promise<void>;
 
 export function PickVideo(arg1:string):Promise<main.PickedVideo>;
 

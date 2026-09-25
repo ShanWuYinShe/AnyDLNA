@@ -57,6 +57,7 @@ export namespace main {
 	    name: string;
 	    model: string;
 	    host: string;
+	    offline: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new DeviceInfo(source);
@@ -68,6 +69,7 @@ export namespace main {
 	        this.name = source["name"];
 	        this.model = source["model"];
 	        this.host = source["host"];
+	        this.offline = source["offline"];
 	    }
 	}
 	export class LoginBrowserInfo {
@@ -190,6 +192,8 @@ export namespace media {
 	    proxyUrl: string;
 	    cookieMode: string;
 	    cookieBrowser: string;
+	    castTitle: string;
+	    quality: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Config(source);
@@ -201,6 +205,8 @@ export namespace media {
 	        this.proxyUrl = source["proxyUrl"];
 	        this.cookieMode = source["cookieMode"];
 	        this.cookieBrowser = source["cookieBrowser"];
+	        this.castTitle = source["castTitle"];
+	        this.quality = source["quality"];
 	    }
 	}
 	export class CookiesInfo {
