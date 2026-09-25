@@ -112,8 +112,9 @@ func (m *Manager) Executable() string {
 }
 
 // Start 启动浏览器（独立 profile）并打开 url；已在运行时改为新开标签页。
+// exePath 指定使用的浏览器可执行文件；空串用候选列表的第一个（偏好顺序）。
 // 返回本次是否复用了已有实例。
-func (m *Manager) Start(ctx context.Context, url string) (reused bool, err error) {
+func (m *Manager) Start(ctx context.Context, url, exePath string) (reused bool, err error) {
 	url = normalizeURL(url)
 
 	m.mu.Lock()
@@ -130,6 +131,13 @@ func (m *Manager) Start(ctx context.Context, url string) (reused bool, err error
 	bins := Available()
 	if len(bins) == 0 {
 		return false, errors.New("未检测到 Chrome / Edge / Brave 等浏览器，请先安装其中之一")
+	}
+	// 指定的浏览器必须真实存在，否则回退到偏好第一个（不静默用错）。
+	bin := bins[0].Path
+	if exePath != "" {
+		if st, statErr := os.Stat(exePath); statErr == nil && !st.IsDir() {
+			bin = exePath
+		}
 	}
 	if err := os.MkdirAll(m.ProfileDir, 0o700); err != nil {
 		return false, fmt.Errorf("创建浏览器配置目录失败: %w", err)
@@ -149,7 +157,7 @@ func (m *Manager) Start(ctx context.Context, url string) (reused bool, err error
 		args = append(args, url)
 	}
 
-	cmd := exec.Command(bins[0].Path, args...)
+	cmd := exec.Command(bin, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
@@ -164,7 +172,7 @@ func (m *Manager) Start(ctx context.Context, url string) (reused bool, err error
 	}
 
 	m.mu.Lock()
-	m.cmd, m.port, m.path, m.exe = cmd, port, wsPath, bins[0].Path
+	m.cmd, m.port, m.path, m.exe = cmd, port, wsPath, bin
 	m.mu.Unlock()
 	return false, nil
 }

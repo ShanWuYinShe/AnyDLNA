@@ -49,7 +49,7 @@ func TestManagerCookiesIntegration(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	reused, err := mgr.Start(ctx, siteURL)
+	reused, err := mgr.Start(ctx, siteURL, "")
 	if err != nil {
 		t.Fatalf("启动浏览器失败: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestManagerCookiesIntegration(t *testing.T) {
 	}
 
 	// 读到后再启动应复用同一实例。
-	reused, err = mgr.Start(ctx, siteURL)
+	reused, err = mgr.Start(ctx, siteURL, "")
 	if err != nil {
 		t.Fatalf("复用启动失败: %v", err)
 	}

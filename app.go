@@ -1102,11 +1102,13 @@ func (a *App) LoginBrowserStatus() *LoginBrowserInfo {
 }
 
 // OpenLoginBrowser 启动应用专用的浏览器窗口访问指定站点供用户登录。
-// 浏览器使用独立 profile，不读写用户日常浏览器的数据；登录状态会被保留，
-// 下次无需重复登录。用户登录完成后需调用 SaveBrowserCookies 取回 Cookies。
+// browserName 指定用哪台浏览器（LoginBrowserStatus 返回的名称）；空串或
+// 未匹配时用检测到的第一个候选。浏览器使用独立 profile，不读写用户日常
+// 浏览器的数据；登录状态会被保留，下次无需重复登录。用户登录完成后需
+// 调用 SaveBrowserCookies 取回 Cookies。
 //
 // 该方法只负责启动，不阻塞等待登录。
-func (a *App) OpenLoginBrowser(rawURL string) error {
+func (a *App) OpenLoginBrowser(rawURL, browserName string) error {
 	if a.browserMgr == nil {
 		return errors.New("登录浏览器未初始化")
 	}
@@ -1117,9 +1119,18 @@ func (a *App) OpenLoginBrowser(rawURL string) error {
 	if !strings.Contains(rawURL, "://") {
 		rawURL = "https://" + rawURL
 	}
+	exe := ""
+	if browserName != "" {
+		for _, b := range browser.Available() {
+			if b.Name == browserName {
+				exe = b.Path
+				break
+			}
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	_, err := a.browserMgr.Start(ctx, rawURL)
+	_, err := a.browserMgr.Start(ctx, rawURL, exe)
 	return err
 }
 

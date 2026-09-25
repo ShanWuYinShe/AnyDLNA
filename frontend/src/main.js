@@ -328,7 +328,8 @@ async function refreshCookieStatus() {
     }
 }
 
-// refreshLoginBrowser 展示本机检测到的浏览器与登录窗口运行状态；
+// refreshLoginBrowser 展示本机检测到的浏览器与登录窗口运行状态，
+// 并填充「用哪台浏览器登录」下拉（默认取候选列表第一个）；
 // 没有可用浏览器时提示改用「读取本机浏览器」。
 async function refreshLoginBrowser() {
     let info;
@@ -346,18 +347,34 @@ async function refreshLoginBrowser() {
     }
     $('btnOpenLogin').disabled = false;
     $('btnSaveCookies').disabled = false;
-    const names = (info.browsers || []).map((b) => b.name).join(' / ');
+
+    // 填充浏览器下拉（值=名称，后端按名称匹配可执行文件）。
+    const sel = $('loginBrowserSelect');
+    const prev = sel.value;
+    sel.innerHTML = '';
+    (info.browsers || []).forEach((b) => {
+        const opt = document.createElement('option');
+        opt.value = b.name;
+        opt.textContent = b.name;
+        sel.appendChild(opt);
+    });
+    if ((info.browsers || []).some((b) => b.name === prev)) {
+        sel.value = prev;
+    }
+
+    const chosen = sel.value;
     el.textContent = info.running
-        ? `登录窗口正在运行（${info.executable || names}）`
-        : `将使用：${names}`;
+        ? `登录窗口正在运行（${info.executable || chosen}）`
+        : `将使用：${chosen}`;
 }
 
 // openLoginBrowser 打开应用专用浏览器窗口，供用户登录站点。
 async function openLoginBrowser() {
     const site = $('loginSite').value.trim() || 'https://www.youtube.com';
+    const browserName = $('loginBrowserSelect').value || '';
     $('btnOpenLogin').disabled = true;
     try {
-        await call('OpenLoginBrowser', site);
+        await call('OpenLoginBrowser', site, browserName);
         showResult($('loginResult'),
             '登录窗口已打开：请在该窗口中完成登录，然后点击「我已登录，保存 Cookies」。', true);
         await refreshLoginBrowser();
