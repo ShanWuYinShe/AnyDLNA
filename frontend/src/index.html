@@ -72,6 +72,20 @@
                 </div>
             </div>
 
+            <!-- 在线视频清晰度 -->
+            <div class="setting-group">
+                <div class="setting-title">在线视频清晰度</div>
+                <div class="setting-desc">限制在线视频的分辨率上限：清晰度越低码率越小，弱网或高清晰度源卡顿时更流畅。编码偏好不变（仍优先 H.264/AAC 以尽量免转码）；不影响本地文件投屏。修改后对下一次解析生效。</div>
+                <div class="url-row">
+                    <select class="url-input" id="qualitySelect">
+                        <option value="best">最高可用（默认）</option>
+                        <option value="1080">最高 1080p</option>
+                        <option value="720">最高 720p</option>
+                        <option value="480">最高 480p</option>
+                    </select>
+                </div>
+            </div>
+
             <!-- 代理 -->
             <div class="setting-group">
                 <div class="setting-title">网络代理</div>

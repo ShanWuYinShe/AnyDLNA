@@ -40,12 +40,21 @@ type Resolved struct {
 // 在线拉流是边下边合边播，大体积音频在慢代理下跟不上视频，合并输出的音频轨
 // 损坏丢失（电视有画面无声音）；小体积 AAC 下载快、不断流，且 128k 在电视
 // 端听感无差。abr 缺失的站点会自动落到下一级兜底，不影响可用性。
-const formatSelector = "bv*[vcodec^=avc1]+ba[acodec^=mp4a][abr<=160]/" +
-	"bv*[vcodec^=avc1]+ba[acodec^=mp4a]/" +
-	"bv*[vcodec^=avc1]+ba/" +
-	"bv*+ba[acodec^=mp4a][abr<=160]/" +
-	"bv*+ba[acodec^=mp4a]/" +
-	"bv*+ba/b"
+// formatSelectorFor 返回 yt-dlp 的格式选择表达式；maxHeight>0 时把视频轨
+// 分辨率限制在该高度以内（如 1080），实现「清晰度上限」。限制加在每个
+// bv* 分支上，逐级回退链与编码偏好保持不变。
+func formatSelectorFor(maxHeight int) string {
+	vh := ""
+	if maxHeight > 0 {
+		vh = fmt.Sprintf("[height<=%d]", maxHeight)
+	}
+	return "bv*[vcodec^=avc1]" + vh + "+ba[acodec^=mp4a][abr<=160]/" +
+		"bv*[vcodec^=avc1]" + vh + "+ba[acodec^=mp4a]/" +
+		"bv*[vcodec^=avc1]" + vh + "+ba/" +
+		"bv*+ba[acodec^=mp4a][abr<=160]/" +
+		"bv*+ba[acodec^=mp4a]/" +
+		"bv*+ba/b"
+}
 
 // HasYtDlp 报告 yt-dlp 是否可用（含常见安装目录，见 ResolveTool）。
 func HasYtDlp() bool {
@@ -120,7 +129,8 @@ func systemProxyArgs() []string {
 // yt-dlp 的报错（如站点验证提示）会截取关键内容返回，便于前端直接展示。
 func Resolve(ctx context.Context, url string, opts Options) (*Resolved, error) {
 	// 缓存命中不依赖 yt-dlp 在 PATH 上，提前返回。
-	if resolved, _, ok := lookupResolveCache(url); ok {
+	key := resolveCacheKey(url, opts.MaxHeight)
+	if resolved, _, ok := lookupResolveCache(key); ok {
 		return resolved, nil
 	}
 	if !HasYtDlp() {
@@ -129,7 +139,7 @@ func Resolve(ctx context.Context, url string, opts Options) (*Resolved, error) {
 	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
-	args := append([]string{"-J", "--no-playlist", "--no-warnings", "-f", formatSelector}, ytDlpCommonArgs(opts)...)
+	args := append([]string{"-J", "--no-playlist", "--no-warnings", "-f", formatSelectorFor(opts.MaxHeight)}, ytDlpCommonArgs(opts)...)
 	cmd := toolCmdContext(ctx, "yt-dlp", append(args, url)...)
 	var stderr limitBuffer
 	cmd.Stderr = &stderr
@@ -146,7 +156,7 @@ func Resolve(ctx context.Context, url string, opts Options) (*Resolved, error) {
 	if err != nil {
 		return nil, err
 	}
-	storeResolveCache(url, resolved, urls)
+	storeResolveCache(key, resolved, urls)
 	return resolved, nil
 }
 
@@ -203,7 +213,8 @@ func ResolveDirect(ctx context.Context, url string, opts Options) (*Resolved, []
 		return nil, nil, MissingToolError("yt-dlp")
 	}
 	// 缓存命中直接返回（重复投屏省 7~30 秒）；直链 TTL 内有效，见 resolvecache.go。
-	if resolved, urls, ok := lookupResolveCache(url); ok {
+	key := resolveCacheKey(url, opts.MaxHeight)
+	if resolved, urls, ok := lookupResolveCache(key); ok {
 		Diagf("解析命中缓存 站点=%s 直链=%d条 url=%.80s", resolved.Extractor, len(urls), url)
 		return resolved, urls, nil
 	}
@@ -211,7 +222,7 @@ func ResolveDirect(ctx context.Context, url string, opts Options) (*Resolved, []
 	defer cancel()
 
 	t0 := time.Now()
-	args := append([]string{"-J", "--no-playlist", "--no-warnings", "-f", formatSelector}, ytDlpCommonArgs(opts)...)
+	args := append([]string{"-J", "--no-playlist", "--no-warnings", "-f", formatSelectorFor(opts.MaxHeight)}, ytDlpCommonArgs(opts)...)
 	cmd := toolCmdContext(ctx, "yt-dlp", append(args, url)...)
 	var stderr limitBuffer
 	cmd.Stderr = &stderr
@@ -229,7 +240,7 @@ func ResolveDirect(ctx context.Context, url string, opts Options) (*Resolved, []
 		return nil, nil, perr
 	}
 	Diagf("解析成功 %.1fs 站点=%s 直链=%d条 url=%.80s", time.Since(t0).Seconds(), resolved.Extractor, len(urls), url)
-	storeResolveCache(url, resolved, urls)
+	storeResolveCache(key, resolved, urls)
 	return resolved, urls, nil
 }
 
@@ -330,7 +341,7 @@ func DirectURLs(ctx context.Context, url string, opts Options) ([]string, error)
 func ytDlpDirectArgs(url string, opts Options) []string {
 	args := append([]string{
 		"-g", "--no-playlist", "--no-warnings",
-		"-f", formatSelector,
+		"-f", formatSelectorFor(opts.MaxHeight),
 	}, ytDlpCommonArgs(opts)...)
 	return append(args, url)
 }

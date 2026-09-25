@@ -225,6 +225,7 @@ async function loadSettings() {
     }
 
     $('castTitleInput').value = cfg.castTitle || '';
+    $('qualitySelect').value = cfg.quality || 'best';
 
     syncProxyRows();
     syncCookieRows();
@@ -269,6 +270,7 @@ function collectConfig() {
         cookieMode: document.querySelector('input[name="cookieMode"]:checked').value,
         cookieBrowser: $('cookieBrowser').value,
         castTitle: $('castTitleInput').value,
+        quality: $('qualitySelect').value,
     };
 }
 

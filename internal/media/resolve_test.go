@@ -18,8 +18,13 @@ func TestYtDlpDirectArgs(t *testing.T) {
 	if !strings.Contains(joined, "-g") {
 		t.Errorf("取直链必须带 -g: %v", args)
 	}
-	if !strings.Contains(joined, "-f "+formatSelector) {
+	if !strings.Contains(joined, "-f "+formatSelectorFor(0)) {
 		t.Errorf("取链应与解析用同一格式选择式: %v", args)
+	}
+	// 清晰度档位必须同时作用于取链与解析（Options.MaxHeight 传递一致）。
+	limited := ytDlpDirectArgs("https://example.com/watch?v=abc", Options{ProxyMode: ProxyModeNone, MaxHeight: 720})
+	if !strings.Contains(strings.Join(limited, " "), "-f "+formatSelectorFor(720)) {
+		t.Errorf("取链应携带清晰度限制: %v", limited)
 	}
 	if !strings.Contains(joined, "--no-playlist") {
 		t.Errorf("缺少 --no-playlist: %v", args)

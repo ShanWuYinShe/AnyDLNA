@@ -300,15 +300,38 @@ func TestOutputArgs(t *testing.T) {
 // TestFormatSelectorPrefersH264 确认选择器把 H.264/AAC 排在前面，
 // 否则会退回 yt-dlp 默认的 AV1/VP9，导致每次都被迫完整转码。
 func TestFormatSelectorPrefersH264(t *testing.T) {
-	if !strings.Contains(formatSelector, "[vcodec^=avc1]") {
-		t.Errorf("选择器应优先 H.264: %s", formatSelector)
+	sel := formatSelectorFor(0)
+	if !strings.Contains(sel, "[vcodec^=avc1]") {
+		t.Errorf("选择器应优先 H.264: %s", sel)
 	}
-	if !strings.Contains(formatSelector, "[acodec^=mp4a]") {
-		t.Errorf("选择器应优先 AAC: %s", formatSelector)
+	if !strings.Contains(sel, "[acodec^=mp4a]") {
+		t.Errorf("选择器应优先 AAC: %s", sel)
 	}
 	// 必须保留兜底分支，保证任何站点都能选出格式。
-	if !strings.Contains(formatSelector, "bv*+ba/b") {
-		t.Errorf("选择器缺少兜底分支: %s", formatSelector)
+	if !strings.Contains(sel, "bv*+ba/b") {
+		t.Errorf("选择器缺少兜底分支: %s", sel)
+	}
+}
+
+// TestFormatSelectorForQuality 清晰度上限应注入每个视频轨分支，
+// 且不影响音频与兜底分支；不限制时不得出现高度过滤。
+func TestFormatSelectorForQuality(t *testing.T) {
+	best := formatSelectorFor(0)
+	if strings.Contains(best, "height") {
+		t.Errorf("最高可用不应限制分辨率: %s", best)
+	}
+	limited := formatSelectorFor(720)
+	if n := strings.Count(limited, "[height<=720]"); n != 3 {
+		t.Errorf("应恰好限制 3 个 bv* 分支，实际 %d 处: %s", n, limited)
+	}
+	if !strings.Contains(limited, "bv*+ba[acodec^=mp4a][abr<=160]") {
+		t.Errorf("限制不得波及兜底分支: %s", limited)
+	}
+	if QualityMaxHeight("720") != 720 || QualityMaxHeight("") != 0 || QualityMaxHeight("bogus") != 0 {
+		t.Error("QualityMaxHeight 档位映射错误")
+	}
+	if !ValidQuality("") || !ValidQuality("1080") || ValidQuality("2160") {
+		t.Error("ValidQuality 档位校验错误")
 	}
 }
 

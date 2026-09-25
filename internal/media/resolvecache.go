@@ -2,6 +2,7 @@ package media
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -102,6 +103,16 @@ func saveResolveCacheLocked() {
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		Diagf("解析缓存落盘失败: %v", err)
 	}
+}
+
+// resolveCacheKey 生成缓存键：解析结果随清晰度档位不同而不同
+// （直链与编码都会变），必须把分辨率上限并入键；0（最高可用）保持纯 URL，
+// 与历史缓存条目兼容。
+func resolveCacheKey(url string, maxHeight int) string {
+	if maxHeight <= 0 {
+		return url
+	}
+	return fmt.Sprintf("%s#h%d", url, maxHeight)
 }
 
 // lookupResolveCache 命中返回解析结果与直链。

@@ -17,7 +17,7 @@ import (
 // 读取环境变量与操作系统代理设置。
 func (c Config) ResolveOptions() Options {
 	c = c.Normalize()
-	opts := Options{ProxyMode: c.ProxyMode, Proxy: c.ProxyURL}
+	opts := Options{ProxyMode: c.ProxyMode, Proxy: c.ProxyURL, MaxHeight: QualityMaxHeight(c.Quality)}
 
 	switch c.CookieMode {
 	case CookieModeBrowser:
