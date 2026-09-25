@@ -644,6 +644,8 @@ func (up *Upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	const step = 256 * 1024
+	// chunk 复用：顺序播放时每秒约 16 次 256KB 分配，用 sync.Pool 消掉。
+	var chunkPool = sync.Pool{New: func() any { return make([]byte, step) }}
 	for off := start; off <= end; {
 		if r.Context().Err() != nil {
 			return
@@ -652,21 +654,23 @@ func (up *Upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if to > end {
 			to = end
 		}
+		chunk := chunkPool.Get().([]byte)[:to-off+1]
 		up.mu.Lock()
 		err := up.ensureLocked(r.Context(), off, to+1)
-		var chunk []byte
 		if err == nil {
-			chunk = make([]byte, to-off+1)
 			_, err = up.file.ReadAt(chunk, off)
 		}
 		up.mu.Unlock()
 		if err != nil {
 			// 中途失败：直接断流（ffmpeg 会报错而非静默卡死）。
+			chunkPool.Put(chunk[:cap(chunk)])
 			return
 		}
 		if _, err := w.Write(chunk); err != nil {
+			chunkPool.Put(chunk[:cap(chunk)])
 			return
 		}
+		chunkPool.Put(chunk[:cap(chunk)])
 		off = to + 1
 	}
 }

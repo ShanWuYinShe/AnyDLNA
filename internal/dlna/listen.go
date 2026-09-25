@@ -3,6 +3,7 @@ package dlna
 import (
 	"context"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -61,9 +62,16 @@ func ListenAlive(ctx context.Context) (<-chan rawDevice, error) {
 	return out, nil
 }
 
+// descDedupTTL 是同一描述地址的重复解析抑制窗口。
+const descDedupTTL = 10 * time.Minute
+
+// descDedupLimit 是描述地址去重表的条数上限：条目按 LOCATION 无限增长
+// 是长驻会话的慢性泄漏（数量随站点/端口变化无上限），超限后淘汰最旧的。
+const descDedupLimit = 256
+
 // WatchRenderers 常驻监听设备广播并解析描述，每发现一台新的、
 // 具备 AVTransport 的渲染设备就回调一次 onDevice（按 UDN 去重，
-// 同一描述地址 10 分钟内不重复解析）。常驻发现与主动搜索互补：
+// 同一描述地址 descDedupTTL 内不重复解析）。常驻发现与主动搜索互补：
 // 部分电视不应答 M-SEARCH，但会周期性广播 alive。
 func WatchRenderers(ctx context.Context, onDevice func(*Device)) error {
 	alive, err := ListenAlive(ctx)
@@ -79,10 +87,11 @@ func WatchRenderers(ctx context.Context, onDevice func(*Device)) error {
 	go func() {
 		for clue := range alive {
 			mu.Lock()
-			if t, ok := lastDesc[clue.Location]; ok && time.Since(t) < 10*time.Minute {
+			if t, ok := lastDesc[clue.Location]; ok && time.Since(t) < descDedupTTL {
 				mu.Unlock()
 				continue
 			}
+			pruneLastDescLocked(lastDesc, time.Now(), descDedupLimit)
 			lastDesc[clue.Location] = time.Now()
 			mu.Unlock()
 
@@ -102,4 +111,30 @@ func WatchRenderers(ctx context.Context, onDevice func(*Device)) error {
 		}
 	}()
 	return nil
+}
+
+// pruneLastDescLocked 限制描述地址去重表的大小：先删除已过抑制窗口的
+// 条目，仍超限时淘汰最旧的，只保留最近 limit 条。调用方须持有表锁；
+// 被淘汰的地址最多代价是重复解析一次，无正确性影响。
+func pruneLastDescLocked(m map[string]time.Time, now time.Time, limit int) {
+	for loc, t := range m {
+		if now.Sub(t) >= descDedupTTL {
+			delete(m, loc)
+		}
+	}
+	if len(m) <= limit {
+		return
+	}
+	type entry struct {
+		loc string
+		t   time.Time
+	}
+	entries := make([]entry, 0, len(m))
+	for loc, t := range m {
+		entries = append(entries, entry{loc, t})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].t.Before(entries[j].t) })
+	for _, e := range entries[:len(entries)-limit] {
+		delete(m, e.loc)
+	}
 }

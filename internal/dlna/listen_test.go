@@ -63,3 +63,38 @@ func TestListenAlive(t *testing.T) {
 		t.Fatal("重复 LOCATION 未去重")
 	}
 }
+
+// TestPruneLastDescLocked 覆盖描述地址去重表的清理：
+// 过期条目直接删除；仍超限时保留最新的 limit 条、淘汰最旧的。
+func TestPruneLastDescLocked(t *testing.T) {
+	now := time.Now()
+	m := map[string]time.Time{
+		"old":     now.Add(-2 * descDedupTTL), // 过期：直接删
+		"mid":     now.Add(-time.Minute),
+		"fresh":   now,
+		"mid-old": now.Add(-2 * time.Minute),
+	}
+	pruneLastDescLocked(m, now, 2)
+	if _, ok := m["old"]; ok {
+		t.Error("过期条目应被删除")
+	}
+	if len(m) != 2 {
+		t.Fatalf("超限后应只保留最新的 2 条，实际 %d: %v", len(m), m)
+	}
+	if _, ok := m["fresh"]; !ok {
+		t.Error("最新条目不应被淘汰")
+	}
+	if _, ok := m["mid"]; !ok {
+		t.Error("次新条目不应被淘汰")
+	}
+	if _, ok := m["mid-old"]; ok {
+		t.Error("最旧条目应被淘汰")
+	}
+
+	// 未超限时不淘汰：只有过期清理生效。
+	m2 := map[string]time.Time{"a": now, "b": now}
+	pruneLastDescLocked(m2, now, 2)
+	if len(m2) != 2 {
+		t.Errorf("未超限不应淘汰: %v", m2)
+	}
+}
