@@ -178,6 +178,16 @@ func TestSaveConfigRoundTrip(t *testing.T) {
 	if got := LoadConfig(); got != want {
 		t.Errorf("保存后读回不一致: got %+v, want %+v", got, want)
 	}
+	// 权限 0600：手动代理地址可能内嵌认证信息，不应让同机其他用户可读。
+	path, err := ConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	} else if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("config.json 权限应为 0600，实际 %v", perm)
+	}
 }
 
 // TestParseScutilProxy 覆盖 macOS 系统代理输出的解析优先级。

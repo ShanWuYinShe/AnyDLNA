@@ -199,5 +199,7 @@ func SaveConfig(c Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	// 0600：手动代理地址可能内嵌认证信息（user:pass@host），配置目录
+	// 不必比 Cookies 文件（0600）更宽松。
+	return os.WriteFile(path, data, 0o600)
 }
