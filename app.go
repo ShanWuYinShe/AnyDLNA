@@ -135,6 +135,9 @@ func (a *App) startup(ctx context.Context) {
 	// 工具「装了却找不到」是最容易误判的一类问题，这里留下可核对的依据。
 	a.logf("外部工具: %s", media.ToolStatus())
 
+	// 清理上次异常退出残留的上游缓存临时文件（正常路径在投屏结束时删除）。
+	media.CleanUpstreamTemps()
+
 	srv, err := media.NewStreamServer()
 	if err != nil {
 		runtime.LogErrorf(ctx, "启动流服务失败: %v", err)

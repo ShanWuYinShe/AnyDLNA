@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -42,6 +43,8 @@ const (
 	upstreamChunkRetries = 3
 	// upstreamStatTimeout 是探测上游长度与 Range 支持的超时。
 	upstreamStatTimeout = 20 * time.Second
+	// upstreamTempPrefix 是上游稀疏缓存临时文件的前缀（见 CleanUpstreamTemps）。
+	upstreamTempPrefix = "anydlna-upstream-"
 )
 
 // upstreamUA 是向上游请求时带的 UA。googlevideo 不校验 UA；B 站等站点走
@@ -161,7 +164,7 @@ func NewUpstream(rawURL string, opts Options) (*Upstream, error) {
 		cancel()
 		return nil, serr
 	}
-	f, err := os.CreateTemp("", "anydlna-upstream-*")
+	f, err := os.CreateTemp("", upstreamTempPrefix+"*")
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("创建上游缓存失败: %w", err)
@@ -174,6 +177,21 @@ func NewUpstream(rawURL string, opts Options) (*Upstream, error) {
 	up.fetch = map[int64]bool{}
 	Diagf("上游就绪 长度=%d Range=%v host=%.60s", up.size, up.ranged, up.url)
 	return up, nil
+}
+
+// CleanUpstreamTemps 清理历史运行残留的上游缓存临时文件。
+// 稀疏缓存是 os.CreateTemp 建的临时文件，正常路径在 Upstream.Close 时删除，
+// 但应用崩溃 / 被强杀时来不及删，会在系统临时目录越积越多。
+// 在应用启动、尚未创建任何 Upstream 时统一清扫一次；删除失败逐个忽略
+// （Windows 上文件仍被占用会报错，Unix 上删除打开中的文件同样无害）。
+func CleanUpstreamTemps() {
+	matches, err := filepath.Glob(filepath.Join(os.TempDir(), upstreamTempPrefix+"*"))
+	if err != nil {
+		return
+	}
+	for _, p := range matches {
+		_ = os.Remove(p)
+	}
 }
 
 // stat 探测上游总长度与 Range 支持（Range: bytes=0-0）。

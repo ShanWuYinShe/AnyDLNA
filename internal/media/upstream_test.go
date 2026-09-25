@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,30 @@ func rangeOrigin(t *testing.T, payload []byte) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.ServeContent(w, r, "v.mp4", time.Now(), bytes.NewReader(payload))
 	}))
+}
+
+// TestCleanUpstreamTemps 启动清扫只删除本应用前缀的残留缓存，
+// 不碰临时目录里的其他文件。
+func TestCleanUpstreamTemps(t *testing.T) {
+	mine, err := os.CreateTemp("", upstreamTempPrefix+"*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(mine.Name()) // 清扫失败时的兜底
+	others, err := os.CreateTemp("", "not-anydlna-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(others.Name())
+
+	CleanUpstreamTemps()
+
+	if _, err := os.Stat(mine.Name()); !os.IsNotExist(err) {
+		t.Errorf("本应用前缀的残留缓存应被删除: %v", err)
+	}
+	if _, err := os.Stat(others.Name()); err != nil {
+		t.Errorf("不应误删临时目录中的其他文件: %v", err)
+	}
 }
 
 // TestUpstreamFullAndRange 全量拉取与 Range 服务必须字节精确。
