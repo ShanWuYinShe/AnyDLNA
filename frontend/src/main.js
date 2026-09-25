@@ -500,7 +500,9 @@ async function poll() {
             $('durTime').textContent = fmtClock(p.durationSec);
         }
     } else if (p.state === 'STOPPED' && ++state.stoppedCount >= 3) {
-        stopControls();
+        // 设备明确停止（连续 3 次）：调后端 StopCast 回收流会话与转码进程，
+        // 只清界面的话会话要等下一次投屏才释放（UNKNOWN 视为暂时无响应，不计数）。
+        stopCast();
     }
 }
 

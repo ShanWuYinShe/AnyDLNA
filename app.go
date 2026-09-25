@@ -773,7 +773,11 @@ func (a *App) Poll() (*Position, error) {
 	pos := &Position{State: "STOPPED"}
 	state, err := renderer.TransportState(ctx)
 	if err != nil {
-		return pos, nil // 设备暂时无响应不算致命，前端下次再试。
+		// 设备暂时无响应不算致命，但要与「设备明确停止」区分：
+		// 前端只对明确的 STOPPED 连续计数判停并回收会话，
+		// 网络抖动若被当作 STOPPED 会误清正在进行的投屏。
+		pos.State = "UNKNOWN"
+		return pos, nil
 	}
 	pos.State = state
 	relTime, duration, err := renderer.PositionInfo(ctx)
