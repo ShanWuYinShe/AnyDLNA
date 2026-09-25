@@ -134,6 +134,10 @@ func DescribeByHost(ctx context.Context, host string) (*Device, error) {
 		dev *Device
 		err error
 	}
+	// 命中后中止其余探测：候选地址可达 24 个，先命中的结果已经足够，
+	// 不让慢地址的请求在后台继续占用连接直到自身超时。
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	ch := make(chan result, len(candidates))
 	for _, raw := range candidates {
 		go func(u string) {
@@ -149,6 +153,7 @@ func DescribeByHost(ctx context.Context, host string) (*Device, error) {
 	for range candidates {
 		r := <-ch
 		if r.dev != nil {
+			cancel()
 			return r.dev, nil
 		}
 		lastErr = r.err
