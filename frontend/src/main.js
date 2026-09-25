@@ -49,6 +49,7 @@ async function searchDevices() {
         // addDeviceItem 按 UDN 去重，已存在的设备不会被重复添加。
         devices.forEach(addDeviceItem);
         updateDeviceHint();
+        tryAutoSelect();
     } catch {
         $('deviceHint').textContent = '搜索失败，请重试';
     }
@@ -83,9 +84,25 @@ function addDeviceItem(d) {
         list.querySelectorAll('.device').forEach((x) => x.classList.remove('selected'));
         li.classList.add('selected');
         state.selectedUDN = d.udn;
+        try { localStorage.setItem('anydlna.lastUDN', d.udn); } catch { /* 存储不可用时静默 */ }
         showDeviceCapabilities(d);
     };
     list.appendChild(li);
+}
+
+// tryAutoSelect 自动选中上一次使用的设备（localStorage 持久化）：
+// 打开应用时大多是想接着往同一台电视投，省掉每次手动点选。
+// 返回是否完成了自动选中。
+function tryAutoSelect() {
+    if (state.selectedUDN) return false;
+    let last;
+    try { last = localStorage.getItem('anydlna.lastUDN'); } catch { return false; }
+    if (!last) return false;
+    const li = $('deviceList').querySelector(`li[data-udn="${CSS.escape(last)}"]`);
+    if (!li) return false;
+    li.click();
+    $('deviceHint').textContent = '已自动选中上次的设备，点击其他设备可更换';
+    return true;
 }
 
 // updateDeviceOffline 按后端推送更新设备条目的离线状态（置灰，不删除条目）。
@@ -152,6 +169,8 @@ async function addDeviceManually() {
 if (window.runtime && window.runtime.EventsOn) {
     window.runtime.EventsOn('device:discovered', (d) => {
         addDeviceItem(d);
+        // 上次的设备可能比应用晚开机：发现它时补一次自动选中。
+        if (tryAutoSelect()) return;
         $('deviceHint').textContent = '已自动发现新设备，点击选择';
         toast('发现新设备：' + d.name);
     });
