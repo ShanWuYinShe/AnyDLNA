@@ -357,13 +357,42 @@ func TestMergeDevicesNotifyOnlyForNew(t *testing.T) {
 	}
 }
 
-// udnsOf 取出设备列表的 UDN 序列，便于断言。
-func udnsOf(devs []*dlna.Device) []string {
+// udnsOf 取出设备视图列表的 UDN 序列，便于断言。
+func udnsOf(devs []DeviceInfo) []string {
 	out := make([]string, 0, len(devs))
 	for _, d := range devs {
 		out = append(out, d.UDN)
 	}
 	return out
+}
+
+// TestMarkMissingDevicesFlipsOffline 连续 3 轮未应答才翻转为离线，
+// 重新应答（mergeDevices 命中）后恢复在线。
+func TestMarkMissingDevicesFlipsOffline(t *testing.T) {
+	a := NewApp()
+	d := &dlna.Device{UDN: "A", FriendlyName: "电视A", Location: "http://a/d.xml"}
+	a.mergeDevices([]*dlna.Device{d}, false)
+
+	if views := a.markMissingDevices(nil); len(views) != 0 {
+		t.Errorf("第 1 轮未应答不应翻转: %+v", views)
+	}
+	if views := a.markMissingDevices(nil); len(views) != 0 {
+		t.Errorf("第 2 轮未应答不应翻转: %+v", views)
+	}
+	views := a.markMissingDevices(nil)
+	if len(views) != 1 || !views[0].Offline || views[0].UDN != "A" {
+		t.Fatalf("第 3 轮未应答应翻转为离线: %+v", views)
+	}
+	if v := a.mergeDevices(nil, false); len(v) != 1 || !v[0].Offline {
+		t.Errorf("合并视图应携带离线状态: %+v", v)
+	}
+	// 重新应答：mergeDevices 命中后应恢复在线。
+	if v := a.mergeDevices([]*dlna.Device{d}, false); len(v) != 1 || v[0].Offline {
+		t.Errorf("重新应答后应恢复在线: %+v", v)
+	}
+	if views := a.markMissingDevices(map[string]bool{"A": true}); len(views) != 0 {
+		t.Errorf("应答设备不应再翻转: %+v", views)
+	}
 }
 
 // equalStrings 比较两个字符串切片是否相等。

@@ -32,6 +32,9 @@ type DeviceInfo struct {
 	Name  string `json:"name"`
 	Model string `json:"model"`
 	Host  string `json:"host"`
+	// Offline 表示设备连续多轮搜索未应答。仅置灰提示、不删除条目：
+	// 部分设备平时不应答搜索但仍可投屏，用户手动添加的设备尤其如此。
+	Offline bool `json:"offline"`
 }
 
 // PickedVideo 是前端选择的视频及其探测结果。
@@ -98,18 +101,19 @@ type App struct {
 	castMu   sync.Mutex // 串行化投屏操作，长耗时步骤不持有 a.mu
 	searchMu sync.Mutex // 串行化主动搜索，长耗时步骤不持有 a.mu
 
-	mu        sync.Mutex
-	cfg       media.Config   // 在线视频代理与 Cookies 配置
-	devices   []*dlna.Device // 已发现的渲染设备（搜索结果 + 被动监听累积）
-	renderer  *dlna.Renderer // 当前投屏目标
-	sessionID string         // 当前流会话 ID
-	castFile  string
-	castMode  string
+	mu         sync.Mutex
+	cfg        media.Config   // 在线视频代理与 Cookies 配置
+	devices    []*dlna.Device // 已发现的渲染设备（搜索结果 + 被动监听累积）
+	deviceMiss map[string]int // UDN → 连续未应答搜索的轮数（离线判定用）
+	renderer   *dlna.Renderer // 当前投屏目标
+	sessionID  string         // 当前流会话 ID
+	castFile   string
+	castMode   string
 }
 
 // NewApp 创建应用实例。
 func NewApp() *App {
-	return &App{cfg: media.DefaultConfig(), browserMgr: browser.NewManager("")}
+	return &App{cfg: media.DefaultConfig(), browserMgr: browser.NewManager(""), deviceMiss: map[string]int{}}
 }
 
 // startup 在应用启动时创建流服务、加载配置并开启设备广播常驻监听。
@@ -166,19 +170,28 @@ func (a *App) shutdown(ctx context.Context) {
 	}
 }
 
-// deviceInfoOf 转换设备为前端展示结构。
-func deviceInfoOf(d *dlna.Device) DeviceInfo {
+// deviceInfoOf 转换新发现（在线）设备为前端展示结构。
+func deviceInfoOf(d *dlna.Device) DeviceInfo { return deviceView(d, false) }
+
+// deviceView 转换设备为前端展示结构；offline 标记由调用方按应答情况给出。
+func deviceView(d *dlna.Device, offline bool) DeviceInfo {
 	name := d.FriendlyName
 	if name == "" {
 		name = d.UDN
 	}
 	return DeviceInfo{
-		UDN:   d.UDN,
-		Name:  name,
-		Model: strings.TrimSpace(d.Manufacturer + " " + d.ModelName),
-		Host:  hostOf(d.Location),
+		UDN:     d.UDN,
+		Name:    name,
+		Model:   strings.TrimSpace(d.Manufacturer + " " + d.ModelName),
+		Host:    hostOf(d.Location),
+		Offline: offline,
 	}
 }
+
+// offlineAfterMisses 是判定设备离线所需的连续未应答搜索轮数。
+// 定时搜索间隔 30 秒，3 轮约 90 秒无应答才置离线，单次丢包不会误判。
+// 只置灰不删除：不应答搜索不代表不能投屏（部分电视平时不应答、只接受下发）。
+const offlineAfterMisses = 3
 
 // describeBudget 是 SSDP 搜索之后用于抓取并解析设备描述的额外时间预算。
 //
@@ -223,22 +236,35 @@ func (a *App) discoverDevices(ctx context.Context, window time.Duration) ([]*dln
 	return dlna.DiscoverRenderers(dctx, window)
 }
 
-// mergeDevices 把设备并入列表并按 UDN 去重，返回合并后的完整列表。
-//
-// notify 为真时，对本次新增的设备推送 device:discovered 事件。
-// 已存在的设备不会重复推送，因此定时搜索不会反复弹出「发现新设备」。
-func (a *App) mergeDevices(devs []*dlna.Device, notify bool) []*dlna.Device {
-	var added []*dlna.Device
+// mergeDevices 把设备并入列表并按 UDN 去重，返回合并后的完整设备视图
+// （含离线标记）。已存在的设备刷新描述并清零离线计数——重新应答即恢复在线，
+// 状态翻转时推送 device:offline 事件。notify 为真时，对本次新增的设备
+// 推送 device:discovered 事件；已存在的设备不会重复推送，
+// 因此定时搜索不会反复弹出「发现新设备」。
+func (a *App) mergeDevices(devs []*dlna.Device, notify bool) []DeviceInfo {
+	var (
+		added     []*dlna.Device
+		recovered []DeviceInfo
+	)
 
 	a.mu.Lock()
+	if a.deviceMiss == nil {
+		a.deviceMiss = map[string]int{}
+	}
 	for _, d := range devs {
-		if d == nil || a.hasDeviceLocked(d.UDN) {
+		if d == nil {
+			continue
+		}
+		if a.hasDeviceLocked(d.UDN) {
+			if v := a.refreshDeviceLocked(d); v != nil {
+				recovered = append(recovered, *v)
+			}
 			continue
 		}
 		a.devices = append(a.devices, d)
 		added = append(added, d)
 	}
-	merged := append([]*dlna.Device(nil), a.devices...)
+	merged := a.deviceViewsLocked()
 	a.mu.Unlock()
 
 	// a.ctx 为 nil 时说明不在 Wails 生命周期内（例如单元测试），此时不推送事件。
@@ -248,7 +274,70 @@ func (a *App) mergeDevices(devs []*dlna.Device, notify bool) []*dlna.Device {
 			runtime.EventsEmit(a.ctx, "device:discovered", deviceInfoOf(d))
 		}
 	}
+	for _, v := range recovered {
+		a.logf("设备恢复在线: %s (%s)", v.Name, v.UDN)
+		a.emitDeviceStatus(v)
+	}
 	return merged
+}
+
+// refreshDeviceLocked 用最新描述覆盖已有设备并清零离线计数；
+// 从离线恢复在线时返回其视图供调用方推送状态事件。调用方须持有 a.mu。
+func (a *App) refreshDeviceLocked(d *dlna.Device) *DeviceInfo {
+	for i, old := range a.devices {
+		if old.UDN != d.UDN {
+			continue
+		}
+		wasOffline := a.deviceMiss[d.UDN] >= offlineAfterMisses
+		a.devices[i] = d
+		delete(a.deviceMiss, d.UDN)
+		if wasOffline {
+			v := deviceView(d, false)
+			return &v
+		}
+		return nil
+	}
+	return nil
+}
+
+// deviceViewsLocked 构造合并后列表的前端视图；调用方须持有 a.mu。
+func (a *App) deviceViewsLocked() []DeviceInfo {
+	out := make([]DeviceInfo, 0, len(a.devices))
+	for _, d := range a.devices {
+		out = append(out, deviceView(d, a.deviceMiss[d.UDN] >= offlineAfterMisses))
+	}
+	return out
+}
+
+// markMissingDevices 对本轮搜索未应答的设备累计离线计数，达到阈值时标记
+// 离线并返回状态翻转的设备视图（调用方锁外推送事件）。found 是本轮应答的
+// UDN 集合——应答者的计数已由 mergeDevices 清零，这里只处理未应答者。
+func (a *App) markMissingDevices(found map[string]bool) []DeviceInfo {
+	a.mu.Lock()
+	if a.deviceMiss == nil {
+		a.deviceMiss = map[string]int{}
+	}
+	var flipped []DeviceInfo
+	for _, d := range a.devices {
+		if found[d.UDN] {
+			continue
+		}
+		a.deviceMiss[d.UDN]++
+		if a.deviceMiss[d.UDN] == offlineAfterMisses {
+			a.logf("设备连续 %d 轮未应答，标记离线: %s (%s)", offlineAfterMisses, d.FriendlyName, d.UDN)
+			flipped = append(flipped, deviceView(d, true))
+		}
+	}
+	a.mu.Unlock()
+	return flipped
+}
+
+// emitDeviceStatus 推送设备在线状态变化；不在 Wails 生命周期内时跳过。
+func (a *App) emitDeviceStatus(v DeviceInfo) {
+	if a.ctx == nil {
+		return
+	}
+	runtime.EventsEmit(a.ctx, "device:offline", v)
 }
 
 // watchDevices 周期性主动搜索设备，直到 ctx 结束。
@@ -268,6 +357,16 @@ func (a *App) watchDevices(ctx context.Context) {
 				continue
 			}
 			a.mergeDevices(devs, true)
+			// 本轮未应答的设备累计离线计数，状态翻转时通知前端置灰/恢复。
+			found := make(map[string]bool, len(devs))
+			for _, d := range devs {
+				if d != nil {
+					found[d.UDN] = true
+				}
+			}
+			for _, v := range a.markMissingDevices(found) {
+				a.emitDeviceStatus(v)
+			}
 		}
 	}
 }
@@ -289,13 +388,8 @@ func (a *App) SearchDevices(timeoutMS int) ([]DeviceInfo, error) {
 	a.logf("搜索设备完成：发现 %d 台", len(devices))
 
 	// 手动搜索不推送事件：调用方直接拿到完整列表并自行渲染。
-	merged := a.mergeDevices(devices, false)
-
-	out := make([]DeviceInfo, 0, len(merged))
-	for _, d := range merged {
-		out = append(out, deviceInfoOf(d))
-	}
-	return out, nil
+	// （离线状态的翻转由定时搜索路径统一推送，手动搜索不重复计数。）
+	return a.mergeDevices(devices, false), nil
 }
 
 // DeviceFormats 描述一台设备声明支持的格式，供设置界面展示。

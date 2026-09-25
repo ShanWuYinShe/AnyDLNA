@@ -70,18 +70,33 @@ function addDeviceItem(d) {
         return;
     }
     const li = document.createElement('li');
-    li.className = 'device';
+    li.className = 'device' + (d.offline ? ' offline' : '');
     li.dataset.udn = d.udn;
+    li.dataset.model = d.model || d.host;
     li.innerHTML = `<div class="d-name"></div><div class="d-model"></div>`;
     li.querySelector('.d-name').textContent = d.name;
-    li.querySelector('.d-model').textContent = d.model || d.host;
+    li.querySelector('.d-model').textContent = (d.offline ? '离线 · ' : '') + li.dataset.model;
     li.onclick = () => {
+        if (li.classList.contains('offline')) {
+            toast('该设备连续多轮未应答，可能已离线；仍可尝试投屏');
+        }
         list.querySelectorAll('.device').forEach((x) => x.classList.remove('selected'));
         li.classList.add('selected');
         state.selectedUDN = d.udn;
         showDeviceCapabilities(d);
     };
     list.appendChild(li);
+}
+
+// updateDeviceOffline 按后端推送更新设备条目的离线状态（置灰，不删除条目）。
+function updateDeviceOffline(d) {
+    const li = $('deviceList').querySelector(`li[data-udn="${CSS.escape(d.udn)}"]`);
+    if (!li) return;
+    li.classList.toggle('offline', !!d.offline);
+    const model = li.querySelector('.d-model');
+    if (model) {
+        model.textContent = (d.offline ? '离线 · ' : '') + (li.dataset.model || '');
+    }
 }
 
 // showDeviceCapabilities 展示选中设备声明的接收能力。
@@ -140,6 +155,8 @@ if (window.runtime && window.runtime.EventsOn) {
         $('deviceHint').textContent = '已自动发现新设备，点击选择';
         toast('发现新设备：' + d.name);
     });
+    // 设备连续多轮未应答搜索（置灰）或重新应答（恢复）时更新列表项。
+    window.runtime.EventsOn('device:offline', updateDeviceOffline);
 }
 
 // ---------- 设置视图切换 ----------
