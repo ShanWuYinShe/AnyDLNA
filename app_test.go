@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +17,37 @@ import (
 	"AnyDLNA/internal/dlna"
 	"AnyDLNA/internal/media"
 )
+
+// TestCastStateSnapshot 覆盖投屏会话快照的写入/清除：
+// 重启恢复控制依赖这份快照，内容与生命周期都必须可靠。
+func TestCastStateSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+	a := NewApp()
+
+	a.saveCastState("UDN1", "http://tv/d.xml", "某视频", "direct")
+	path, err := castStatePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("快照应已写入: %v", err)
+	}
+	var st castSessionState
+	if err := json.Unmarshal(data, &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.UDN != "UDN1" || st.Location != "http://tv/d.xml" || st.Title != "某视频" || st.Mode != "direct" {
+		t.Errorf("快照内容不一致: %+v", st)
+	}
+
+	a.clearCastState()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("清除后快照应不存在: %v", err)
+	}
+}
 
 // TestCastDisplayTitle 覆盖投屏显示名称（设置项 castTitle）的三种形态：
 // 未配置保持原标题、固定名称整体生效、{title} 占位符替换为原标题。

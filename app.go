@@ -2,9 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -158,6 +162,9 @@ func (a *App) startup(ctx context.Context) {
 	// 定时主动搜索：不少电视（含实测的目标设备）平时不广播、只应答搜索，
 	// 仅靠被动监听无法在设备开机后自动发现，因此需要周期性主动搜索兜底。
 	go a.watchDevices(watchCtx)
+
+	// 尽力恢复上次投屏的控制（按持久化的设备描述地址重新拉取，网络 I/O 不阻塞启动）。
+	go a.restoreCast()
 }
 
 // shutdown 在应用退出时清理流服务、监听、浏览器与转码进程。
@@ -739,6 +746,8 @@ func (a *App) startCast(dev *dlna.Device, srv *media.StreamServer, sessionID, ti
 	a.castMode = mode
 	a.mu.Unlock()
 
+	a.saveCastState(dev.UDN, dev.Location, title, mode)
+
 	return &CastStatus{Active: true, Device: dev.FriendlyName, File: title, Mode: mode}, nil
 }
 
@@ -756,6 +765,92 @@ func (a *App) stopCast() {
 
 	if sessionID != "" && srv != nil {
 		srv.Remove(sessionID)
+	}
+	a.clearCastState()
+}
+
+// ---------- 投屏会话快照：重启后恢复控制 ----------
+
+// castSessionState 是投屏会话的持久化快照，供应用重启后尽力恢复控制。
+type castSessionState struct {
+	UDN      string `json:"udn"`
+	Location string `json:"location"` // 设备描述地址，重启后据此重新拉取
+	Title    string `json:"title"`
+	Mode     string `json:"mode"`
+}
+
+// castStatePath 返回投屏会话快照文件路径。
+func castStatePath() (string, error) {
+	dir, err := media.DataDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "cast_session.json"), nil
+}
+
+// saveCastState 持久化当前投屏会话。写失败只记日志：恢复是尽力而为的
+// 增强能力，不应反过来影响投屏本身。
+func (a *App) saveCastState(udn, location, title, mode string) {
+	path, err := castStatePath()
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	data, err := json.Marshal(castSessionState{UDN: udn, Location: location, Title: title, Mode: mode})
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		a.logf("投屏状态落盘失败: %v", err)
+	}
+}
+
+// clearCastState 删除投屏会话快照（投屏结束/清理时）。
+func (a *App) clearCastState() {
+	if path, err := castStatePath(); err == nil {
+		_ = os.Remove(path)
+	}
+}
+
+// restoreCast 尝试恢复上次投屏的控制能力。重启后本机流服务端口已变，
+// 电视端继续拉流会失败，但 AVTransport 控制（暂停/停止/音量）独立于流地址：
+// 恢复后至少能看到投屏内容并暂停/停止，而不是留下一个无法控制的「僵尸投屏」。
+// 设备描述拉取失败（已关机/网络不可达）时清除快照，静默结束。
+func (a *App) restoreCast() {
+	path, err := castStatePath()
+	if err != nil {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var st castSessionState
+	if err := json.Unmarshal(data, &st); err != nil || st.UDN == "" || st.Location == "" {
+		_ = os.Remove(path)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	dev, err := dlna.Describe(ctx, &http.Client{Timeout: 15 * time.Second}, st.Location)
+	if err != nil || !dev.HasAVTransport() {
+		_ = os.Remove(path)
+		return
+	}
+
+	a.mu.Lock()
+	a.renderer = dlna.NewRenderer(dev)
+	a.sessionID = "" // 本机流会话已随重启失效，仅恢复控制面
+	a.castFile = st.Title
+	a.castMode = st.Mode
+	a.mu.Unlock()
+
+	a.logf("恢复上次投屏控制: %s · %s（流已随重启失效，可暂停/停止/调音量）", dev.FriendlyName, st.Title)
+	if a.ctx != nil {
+		runtime.EventsEmit(a.ctx, "cast:restored", a.GetCastStatus())
 	}
 }
 

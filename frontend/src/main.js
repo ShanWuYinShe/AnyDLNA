@@ -176,6 +176,13 @@ if (window.runtime && window.runtime.EventsOn) {
     });
     // 设备连续多轮未应答搜索（置灰）或重新应答（恢复）时更新列表项。
     window.runtime.EventsOn('device:offline', updateDeviceOffline);
+    // 应用重启后恢复了上次投屏的控制（电视可能还在播/暂停在原内容上）。
+    window.runtime.EventsOn('cast:restored', (st) => {
+        if (st && st.active) {
+            startControls(st);
+            toast('已恢复上次投屏的控制：' + st.device + ' · ' + st.file);
+        }
+    });
 }
 
 // ---------- 设置视图切换 ----------
@@ -614,4 +621,10 @@ function whenReady(fn, tries = 50) {
 // 打开即搜索一次。被动监听只能等到设备主动广播 SSDP alive，
 // 而不少电视（含实测的目标设备）平时不广播、只应答搜索，
 // 若只依赖监听，打开应用后列表会长时间为空，看起来像「搜不到设备」。
-whenReady(searchDevices);
+// 同时查询一次投屏状态：应用重启后若恢复了上次投屏的控制，直接显示控制条。
+whenReady(() => {
+    searchDevices();
+    window.go.main.App.GetCastStatus()
+        .then((st) => { if (st && st.active) startControls(st); })
+        .catch(() => { /* 后端不可达时轮询路径会再试 */ });
+});
