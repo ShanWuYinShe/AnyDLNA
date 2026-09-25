@@ -489,7 +489,7 @@ func (a *App) PickVideo(udn string) (*PickedVideo, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	info, err := media.Probe(ctx, path)
+	info, err := media.CachedProbe(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -557,7 +557,7 @@ func (a *App) Cast(udn, path, titleOverride string) (*CastStatus, error) {
 	if !media.HasFFmpeg() {
 		// 无 ffmpeg 时只能投递原文件字节：换封装与转码都需要 ffmpeg。
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		info, probeErr := media.Probe(ctx, path)
+		info, probeErr := media.CachedProbe(ctx, path)
 		cancel()
 		if probeErr != nil || !media.PlanForLocal(info, caps).IsDirect() {
 			return nil, fmt.Errorf("%w；当前只能直接播放设备可解码的原文件", media.MissingToolError("ffmpeg"))
@@ -567,7 +567,7 @@ func (a *App) Cast(udn, path, titleOverride string) (*CastStatus, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	info, err := media.Probe(ctx, path)
+	info, err := media.CachedProbe(ctx, path)
 	if err != nil {
 		return nil, err
 	}

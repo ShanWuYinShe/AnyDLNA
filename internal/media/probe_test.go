@@ -13,6 +13,47 @@ func capsWith(mimes ...string) DeviceCapabilities {
 	return DeviceCapabilities{Queried: true, MIMEs: mimes}
 }
 
+// TestCachedProbeReusesResult 探测缓存按「路径+大小+修改时间」命中：
+// 选择视频后点投屏的第二次探测不应重复解析；文件被替换后立即失效。
+func TestCachedProbeReusesResult(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "v.mp4")
+	if err := os.WriteFile(path, []byte("fake-content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	fake := func(_ context.Context, p string) (*Info, error) {
+		calls++
+		return &Info{Path: p, Title: "v"}, nil
+	}
+
+	info1, err := cachedProbe(context.Background(), path, fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info2, err := cachedProbe(context.Background(), path, fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Errorf("第二次探测应命中缓存，实际解析 %d 次", calls)
+	}
+	if *info1 != *info2 || info1.Title != "v" {
+		t.Errorf("命中结果应一致: %+v vs %+v", *info1, *info2)
+	}
+
+	// 文件被替换（大小变化）：立即重新探测，不使用过期数据。
+	if err := os.WriteFile(path, []byte("fake-content-replaced-longer"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cachedProbe(context.Background(), path, fake); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Errorf("文件替换后应重新探测，实际解析 %d 次", calls)
+	}
+}
+
 // TestPlanForLocalNegotiation 覆盖本地文件在设备能力已知时的决策。
 // 核心期望：设备声明支持该容器时直接投原文件（零开销）；
 // 只要视频是 H.264 就绝不重编码视频。

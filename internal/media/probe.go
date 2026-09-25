@@ -4,7 +4,11 @@ package media
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
 
 // Info 是本地文件探测得到的媒体关键信息。
@@ -41,6 +45,53 @@ func HasFFmpeg() bool {
 // 文件不可读才返回错误。
 func Probe(_ context.Context, path string) (*Info, error) {
 	return goProbeFile(path)
+}
+
+// probeCacheTTL 是探测结果缓存的存活时间：覆盖「选择视频 → 点投屏」的
+// 操作间隔，又不至于在文件被替换后长期使用旧结果。
+const probeCacheTTL = 30 * time.Second
+
+type probeCacheEntry struct {
+	info  Info
+	size  int64
+	mtime time.Time
+	at    time.Time
+}
+
+var (
+	probeCacheMu sync.Mutex
+	probeCache   = map[string]probeCacheEntry{}
+)
+
+// CachedProbe 复用同一文件（路径+大小+修改时间一致）在 probeCacheTTL 内的
+// 探测结果：界面「选择视频」已探测过一次，点投屏时再探一次纯属重复。
+// 文件被替换（大小或修改时间变化）时立即重新探测，不使用过期数据。
+func CachedProbe(ctx context.Context, path string) (*Info, error) {
+	return cachedProbe(ctx, path, Probe)
+}
+
+func cachedProbe(ctx context.Context, path string, probe func(context.Context, string) (*Info, error)) (*Info, error) {
+	key := filepath.Clean(path)
+	st, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	probeCacheMu.Lock()
+	e, ok := probeCache[key]
+	probeCacheMu.Unlock()
+	if ok && e.size == st.Size() && e.mtime.Equal(st.ModTime()) && now.Sub(e.at) < probeCacheTTL {
+		info := e.info
+		return &info, nil
+	}
+	info, err := probe(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	probeCacheMu.Lock()
+	probeCache[key] = probeCacheEntry{info: *info, size: st.Size(), mtime: st.ModTime(), at: now}
+	probeCacheMu.Unlock()
+	return info, nil
 }
 
 // OutputMode 描述一路投屏流的输出方式。
