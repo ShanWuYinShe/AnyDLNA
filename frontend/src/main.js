@@ -469,7 +469,14 @@ function renderPending() {
     if (!p) return;
     $('videoCard').classList.remove('hidden');
     $('videoHint').classList.add('hidden');
-    $('vName').textContent = p.name || p.title || '未命名';
+    const original = p.name || p.title || '未命名';
+    $('vName').textContent = original;
+    // 投屏名称预览：全局设置模板应用到当前标题；留空输入框即按此显示，
+    // 填写则仅本次生效（优先于设置）。
+    const tpl = ((state.config && state.config.castTitle) || '').trim();
+    const preview = tpl ? tpl.split('{title}').join(original) : original;
+    $('castNameInput').value = '';
+    $('castNameInput').placeholder = `电视上显示为：${preview}（可改，仅本次生效）`;
     const m = modeText(p);
     if (p.type === 'file') {
         const res = p.width ? `${p.width}×${p.height} · ` : '';
@@ -497,9 +504,10 @@ async function cast() {
     btn.disabled = true;
     btn.textContent = p.type === 'url' ? '正在解析并投屏…' : '正在投屏…';
     try {
+        const nameOverride = $('castNameInput').value.trim();
         const st = p.type === 'file'
-            ? await call('Cast', state.selectedUDN, p.path)
-            : await call('CastURL', state.selectedUDN, p.url);
+            ? await call('Cast', state.selectedUDN, p.path, nameOverride)
+            : await call('CastURL', state.selectedUDN, p.url, nameOverride);
         startControls(st);
     } catch { /* toast 已提示 */ }
     finally {
@@ -624,6 +632,10 @@ function whenReady(fn, tries = 50) {
 // 同时查询一次投屏状态：应用重启后若恢复了上次投屏的控制，直接显示控制条。
 whenReady(() => {
     searchDevices();
+    // 预载设置：投屏名称预览需要全局 castTitle 模板。
+    window.go.main.App.GetConfig()
+        .then((cfg) => { state.config = cfg; })
+        .catch(() => { /* 读取失败时预览退化为原标题 */ });
     window.go.main.App.GetCastStatus()
         .then((st) => { if (st && st.active) startControls(st); })
         .catch(() => { /* 后端不可达时轮询路径会再试 */ });

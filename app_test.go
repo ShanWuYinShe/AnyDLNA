@@ -18,6 +18,22 @@ import (
 	"AnyDLNA/internal/media"
 )
 
+// TestEffectiveCastTitle 覆盖本次投屏临时名称与全局设置的优先级。
+func TestEffectiveCastTitle(t *testing.T) {
+	a := NewApp()
+	a.cfg = media.Config{CastTitle: "{title} · 来自 AnyDLNA"}
+	if got := a.effectiveCastTitle("某视频", ""); got != "某视频 · 来自 AnyDLNA" {
+		t.Errorf("无覆盖时应按全局模板: %q", got)
+	}
+	if got := a.effectiveCastTitle("某视频", "  今晚的电影  "); got != "今晚的电影" {
+		t.Errorf("覆盖应去空格并整体生效: %q", got)
+	}
+	a.cfg = media.Config{}
+	if got := a.effectiveCastTitle("某视频", ""); got != "某视频" {
+		t.Errorf("无模板无覆盖时应保持原标题: %q", got)
+	}
+}
+
 // TestCastStateSnapshot 覆盖投屏会话快照的写入/清除：
 // 重启恢复控制依赖这份快照，内容与生命周期都必须可靠。
 func TestCastStateSnapshot(t *testing.T) {
@@ -131,7 +147,7 @@ func TestCastURLDoesNotDeadlock(t *testing.T) {
 	// 关键断言是：它必须「返回」，而不是死锁。
 	done := make(chan error, 1)
 	go func() {
-		_, err := app.CastURL(dev.UDN, "not-a-valid-url:///")
+		_, err := app.CastURL(dev.UDN, "not-a-valid-url:///", "")
 		done <- err
 	}()
 
@@ -170,14 +186,14 @@ func TestCastURLReportsMissingTools(t *testing.T) {
 	app.devices = append(app.devices, dev)
 
 	// 设备不存在时应有明确错误。
-	if _, err := app.CastURL("no-such-udn", "https://example.com/v"); err == nil {
+	if _, err := app.CastURL("no-such-udn", "https://example.com/v", ""); err == nil {
 		t.Error("设备不存在时应返回错误")
 	}
 
 	// 设备存在但 URL 无法解析时应返回错误（而非挂起）。
 	done := make(chan error, 1)
 	go func() {
-		_, err := app.CastURL(dev.UDN, "not-a-valid-url:///")
+		_, err := app.CastURL(dev.UDN, "not-a-valid-url:///", "")
 		done <- err
 	}()
 	select {
@@ -208,7 +224,7 @@ func TestConcurrentIPCNotBlockedByCast(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, _ = app.CastURL(dev.UDN, "not-a-valid-url:///")
+		_, _ = app.CastURL(dev.UDN, "not-a-valid-url:///", "")
 	}()
 
 	// 投屏进行中，其他 IPC 调用应在短时间内返回。

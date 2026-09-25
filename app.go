@@ -541,7 +541,9 @@ func (a *App) deviceCapabilities(dev *dlna.Device) media.DeviceCapabilities {
 }
 
 // Cast 把本地视频投到指定设备：注册流会话并通过 AVTransport 下发播放。
-func (a *App) Cast(udn, path string) (*CastStatus, error) {
+// Cast 把本地视频投到指定设备：注册流会话并通过 AVTransport 下发播放。
+// titleOverride 为本次投屏的临时显示名称（空串=按全局设置），优先于设置。
+func (a *App) Cast(udn, path, titleOverride string) (*CastStatus, error) {
 	a.castMu.Lock()
 	defer a.castMu.Unlock()
 
@@ -570,7 +572,7 @@ func (a *App) Cast(udn, path string) (*CastStatus, error) {
 		return nil, err
 	}
 	plan := media.PlanForLocal(info, caps)
-	title := a.castDisplayTitle(info.Title)
+	title := a.effectiveCastTitle(info.Title, titleOverride)
 
 	var sessionID, mime, mode string
 	switch plan.Mode {
@@ -638,6 +640,15 @@ func (a *App) castDisplayTitle(defaultTitle string) string {
 	return strings.ReplaceAll(tpl, "{title}", defaultTitle)
 }
 
+// effectiveCastTitle 结合全局设置与本次投屏的临时覆盖得出最终显示标题：
+// 覆盖非空（去首尾空格）时整体生效，优先于全局设置；否则按 castDisplayTitle。
+func (a *App) effectiveCastTitle(defaultTitle, override string) string {
+	if t := strings.TrimSpace(override); t != "" {
+		return t
+	}
+	return a.castDisplayTitle(defaultTitle)
+}
+
 // castTarget 取出投屏目标设备与流服务，校验可用性。
 func (a *App) castTarget(udn string) (*dlna.Device, *media.StreamServer, error) {
 	a.mu.Lock()
@@ -656,10 +667,11 @@ func (a *App) castTarget(udn string) (*dlna.Device, *media.StreamServer, error) 
 
 // CastURL 把在线视频（YouTube、Bilibili 等视频网站页面或流地址）
 // 经本机 yt-dlp 拉流 + ffmpeg 转码中转后投到指定设备。
+// titleOverride 为本次投屏的临时显示名称（空串=按全局设置），优先于设置。
 //
 // 注意：yt-dlp 解析可能耗时数十秒，期间绝不能持有 a.mu，
 // 否则所有前端 IPC（轮询、状态读取）都会被阻塞。
-func (a *App) CastURL(udn, rawURL string) (*CastStatus, error) {
+func (a *App) CastURL(udn, rawURL, titleOverride string) (*CastStatus, error) {
 	a.castMu.Lock()
 	defer a.castMu.Unlock()
 
@@ -692,7 +704,7 @@ func (a *App) CastURL(udn, rawURL string) (*CastStatus, error) {
 	media.Diagf("投屏解析 url=%.80s 标题=%.40s 时长=%.0fs 直播=%v 站点=%s 直链=%d条",
 		rawURL, resolved.Title, resolved.DurationSec, resolved.IsLive, resolved.Extractor, len(urls))
 	plan := media.PlanForOnline(resolved.VideoCodec, resolved.AudioCodec, caps)
-	title := a.castDisplayTitle(resolved.Title)
+	title := a.effectiveCastTitle(resolved.Title, titleOverride)
 	sessionID, err := srv.AddTranscodeURL(ctx, rawURL, title, resolved.IsLive, opts, plan, resolved.Extractor, urls)
 	if err != nil {
 		media.Diagf("投屏失败 预热 会话=%s err=%v", sessionID, err)
