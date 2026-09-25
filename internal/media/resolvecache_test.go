@@ -1,6 +1,7 @@
 package media
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -26,6 +27,20 @@ func withTempResolveCache(t *testing.T) string {
 
 func sampleResolved() *Resolved {
 	return &Resolved{Title: "T", DurationSec: 60, Extractor: "youtube", VideoCodec: "avc1", AudioCodec: "mp4a"}
+}
+
+// TestResolveUsesResolveCache 预览解析复用解析缓存：命中时不调用 yt-dlp
+// （本机有无 yt-dlp 都应命中，恰证明「解析 → 投屏」不会重复解析）。
+func TestResolveUsesResolveCache(t *testing.T) {
+	withTempResolveCache(t)
+	storeResolveCache("https://cache-hit.example/v", sampleResolved(), []string{"http://a/v"})
+	res, err := Resolve(context.Background(), "https://cache-hit.example/v", Options{ProxyMode: ProxyModeNone})
+	if err != nil {
+		t.Fatalf("缓存命中应直接返回: %v", err)
+	}
+	if res.Title != "T" || res.DurationSec != 60 {
+		t.Errorf("命中结果不一致: %+v", res)
+	}
 }
 
 // TestResolveCacheHitAndMiss 存取命中、未命中与空直链不缓存。

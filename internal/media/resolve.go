@@ -115,8 +115,14 @@ func systemProxyArgs() []string {
 
 // Resolve 用 yt-dlp 解析视频页面 URL，提取标题、时长与直播标记。
 // 仅读取元数据（-J），不拉取媒体流；opts 语义见 ytDlpCommonArgs。
+// 结果与 ResolveDirect 共用解析缓存：「解析预览 → 投屏」是同一 URL 的连续
+// 两次解析，预览命中/预热缓存后投屏直接复用，省 7~30 秒（见 resolvecache.go）。
 // yt-dlp 的报错（如站点验证提示）会截取关键内容返回，便于前端直接展示。
 func Resolve(ctx context.Context, url string, opts Options) (*Resolved, error) {
+	// 缓存命中不依赖 yt-dlp 在 PATH 上，提前返回。
+	if resolved, _, ok := lookupResolveCache(url); ok {
+		return resolved, nil
+	}
 	if !HasYtDlp() {
 		return nil, MissingToolError("yt-dlp")
 	}
@@ -135,10 +141,12 @@ func Resolve(ctx context.Context, url string, opts Options) (*Resolved, error) {
 		return nil, fmt.Errorf("解析视频失败（站点不支持、网络不可达或代理不可用）: %w", err)
 	}
 
-	resolved, _, err := parseResolveJSON(out)
+	// 直链一并入缓存：随后投屏（ResolveDirect）命中即免二次解析。
+	resolved, urls, err := parseResolveJSON(out)
 	if err != nil {
 		return nil, err
 	}
+	storeResolveCache(url, resolved, urls)
 	return resolved, nil
 }
 
