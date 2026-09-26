@@ -144,8 +144,11 @@ func (t *Transcoder) Stop() {
 	t.stopAllLocked()
 	t.closeDirectLocked()
 	t.mu.Unlock()
-	// hub.stop 会等采集进程退出，放锁外执行。
-	go hub.stop()
+	// hub.stop 会等采集进程退出：放锁外执行，但必须同步等待。
+	// 重投屏时新会话的 ffmpeg 马上就要打开独占的摄像头，若旧进程
+	// 还在释放设备，新进程会 hang 在 avfoundation 打开上，电视端
+	// 等不到数据而断开（日志里的 0 字节连接即源于此）。
+	hub.stop()
 }
 
 // closeDirectLocked 关闭 Go 传输的本机服务与上游拉取器；调用方须持有 t.mu。
