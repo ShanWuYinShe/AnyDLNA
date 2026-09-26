@@ -110,9 +110,10 @@ func TestCameraStreamMonitor(t *testing.T) {
 	}
 	t.Logf("每秒 KB: %s", line)
 
-	// 校验：CBR 下平均码率应接近 375KB/s（3Mbps/8）；不应有显著停滞空洞。
-	if avg < 200*1024 || avg > 600*1024 {
-		t.Errorf("平均码率偏离 CBR 预期（375KB/s）: %.0f KB/s", avg/1024)
+	// 校验：VBR 下平均码率不应异常（静止场景通常几十 KB/s 起）；
+	// 服务端不应有显著的数据停滞空洞（停滞即电视端卡顿的直接证据）。
+	if avg < 8*1024 {
+		t.Errorf("平均码率异常偏低: %.0f KB/s", avg/1024)
 	}
 	if st.maxGap > 2*time.Second {
 		t.Errorf("服务端存在明显数据停滞: %v", st.maxGap)

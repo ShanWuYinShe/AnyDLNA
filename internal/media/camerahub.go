@@ -31,14 +31,16 @@ const cameraRingBytes = 8 << 20
 // read 返回该错误；消费者应结束本次连接，电视端会自动重连恢复。
 var cameraErrLagged = errors.New("摄像头消费者落后于实时流")
 
-// cameraOutputArgs 摄像头输出的编码与封装参数：完整转码 + 直播短 GOP +
-// CBR 恒定码率。CBR 是 IPTV 直播 TS 的标准做法：码率恒定让电视端缓冲
-// 管理稳定，避免 VBR 突发触发电视端「缓冲满即断流重连」的行为。
-// 全部编码参数必须在 containerArgs（以输出文件名结尾）之前给出。
+// cameraOutputArgs 摄像头输出的编码与封装参数：完整转码 + 直播短 GOP。
+// 刻意不用 -muxrate（CBR 恒定码率填充）：CBR 是 UDP 组播/IPTV 的做法，
+// 对 HTTP 单播拉流会用无意义的 null 包把码率硬填到设定值（约为真实数据
+// 的 5 倍），电视端播放缓冲被填充垃圾迅速塞满后判停断开——实测表现为
+// 电视端周期性（约 25 秒）主动断开重连。HTTP 单播由 TCP 自带流控，
+// VBR 真实码率即可；全部编码参数必须在 containerArgs（以输出文件名
+// 结尾）之前给出。
 func cameraOutputArgs(plan Plan) []string {
 	args := codecArgs(plan, 0)
 	args = append(args, "-g", "60", "-keyint_min", "60", "-tune", "zerolatency")
-	args = append(args, "-muxrate", "3M", "-muxdelay", "0")
 	return append(args, containerArgs(plan.Container)...)
 }
 
