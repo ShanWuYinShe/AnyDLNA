@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"AnyDLNA/internal/dlna"
+	"AnyDLNA/internal/faketv"
 	"AnyDLNA/internal/media"
 )
 
@@ -455,4 +456,86 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestCameraCastStopRecastWithFakeTV 用假电视走完整 App 层摄像头投屏链路：
+// 投屏→假电视拉流→停止→重投→再拉流。覆盖用户报告「投屏后应用直接退出」
+// 的完整路径：任何 panic/死锁都会让测试直接失败并给出堆栈。
+// 需要真实摄像头与 ffmpeg（ANYDLNA_CAMERA_ITEST=1 启用）。
+func TestCameraCastStopRecastWithFakeTV(t *testing.T) {
+	if os.Getenv("ANYDLNA_CAMERA_ITEST") == "" {
+		t.Skip("需要真实摄像头：设 ANYDLNA_CAMERA_ITEST=1 启用")
+	}
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir) // os.UserConfigDir 在 macOS 上读 HOME，避免污染真实配置
+
+	tv, err := faketv.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	dev, err := dlna.Describe(ctx, http.DefaultClient, tv.DescriptionURL())
+	if err != nil {
+		t.Fatalf("读取假电视描述失败: %v", err)
+	}
+
+	app := NewApp()
+	srv, err := media.NewStreamServer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	app.streamSrv = srv
+	app.devices = append(app.devices, dev)
+
+	devs, err := media.ListCameras(ctx)
+	if err != nil {
+		t.Fatalf("枚举摄像头失败: %v", err)
+	}
+	videoIdx := ""
+	for _, d := range devs {
+		if d.Kind == "video" {
+			videoIdx = d.Index
+			break
+		}
+	}
+	if videoIdx == "" {
+		t.Skip("未检测到摄像头设备")
+	}
+
+	castAndFlow := func(round string) {
+		t.Helper()
+		st, err := app.CastCamera(dev.UDN, videoIdx, "", "")
+		if err != nil {
+			t.Fatalf("%s: 投屏失败: %v", round, err)
+		}
+		t.Logf("%s: 已投屏 device=%s file=%s", round, st.Device, st.File)
+		time.Sleep(5 * time.Second)
+		n, packets, errs := tv.Stats()
+		t.Logf("%s: 假电视累计 %d 字节 %d 包 %d 错误", round, n, packets, errs)
+		if n == 0 {
+			t.Fatalf("%s: 假电视未收到任何数据", round)
+		}
+		if errs != 0 {
+			t.Fatalf("%s: TS 同步错误 %d", round, errs)
+		}
+	}
+
+	castAndFlow("第一轮")
+	if err := app.StopCast(); err != nil {
+		t.Fatalf("停止失败: %v", err)
+	}
+	n1, _, _ := tv.Stats()
+	castAndFlow("第二轮（重投）")
+	n2, _, _ := tv.Stats()
+	if n2 <= n1 {
+		t.Fatalf("重投后假电视无新数据: 之前 %d 之后 %d", n1, n2)
+	}
+	if err := app.StopCast(); err != nil {
+		t.Fatalf("第二次停止失败: %v", err)
+	}
 }

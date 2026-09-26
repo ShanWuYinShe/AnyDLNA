@@ -345,10 +345,14 @@ func (t *Transcoder) streamCameraLocked(w io.Writer) (func(), <-chan struct{}, e
 		t.cameraHub = hub
 		Diagf("摄像头采集启动 %s", CameraLabel(t.camera.VideoDevice, t.camera.AudioDevice))
 	}
+	// hub 必须先捕获到局部变量：goroutine 与 Stop() 并发时，直接读
+	// t.cameraHub 会遇到 Stop 刚把它置 nil，造成 nil 解引用 panic
+	// （Go panic 走 exit(2) 正常退出，不产生系统崩溃报告，表现就是应用直接消失）。
+	hub := t.cameraHub
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if err := t.cameraHub.streamTo(w); err != nil && !errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, cameraErrLagged) {
+		if err := hub.streamTo(w); err != nil && !errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, cameraErrLagged) {
 			Diagf("摄像头分发结束: %v", err)
 		}
 	}()
