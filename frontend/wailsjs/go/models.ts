@@ -187,6 +187,22 @@ export namespace main {
 
 export namespace media {
 	
+	export class CameraDevice {
+	    kind: string;
+	    index: string;
+	    name: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CameraDevice(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.kind = source["kind"];
+	        this.index = source["index"];
+	        this.name = source["name"];
+	    }
+	}
 	export class Config {
 	    proxyMode: string;
 	    proxyUrl: string;

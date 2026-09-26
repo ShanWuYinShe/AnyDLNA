@@ -7,6 +7,8 @@ export function AddDeviceManually(arg1:string):Promise<main.DeviceInfo>;
 
 export function Cast(arg1:string,arg2:string,arg3:string):Promise<main.CastStatus>;
 
+export function CastCamera(arg1:string,arg2:string,arg3:string,arg4:string):Promise<main.CastStatus>;
+
 export function CastURL(arg1:string,arg2:string,arg3:string):Promise<main.CastStatus>;
 
 export function ClearCookies():Promise<void>;
@@ -24,6 +26,8 @@ export function GetConfig():Promise<media.Config>;
 export function GetCookieStatus():Promise<media.CookiesInfo>;
 
 export function GetVolume():Promise<number>;
+
+export function ListCameras():Promise<Array<media.CameraDevice>>;
 
 export function LoginBrowserStatus():Promise<main.LoginBrowserInfo>;
 

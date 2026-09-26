@@ -1206,3 +1206,48 @@ func hostOf(raw string) string {
 	}
 	return u.Host
 }
+
+// ---------- 摄像头投屏 ----------
+
+// ListCameras 列出本机可用的摄像头与麦克风（macOS avfoundation）。
+// 首次调用会触发系统摄像头/麦克风权限弹窗，允许后才能采集。
+func (a *App) ListCameras() ([]media.CameraDevice, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return media.ListCameras(ctx)
+}
+
+// CastCamera 把摄像头实时画面（可选麦克风）经实时转码投到指定设备。
+// 直播性质：不支持进度拖动；固定 720p30，完整转码 H.264/AAC。
+// titleOverride 为本次投屏的临时显示名称（空串=按全局设置）。
+func (a *App) CastCamera(udn, videoDevice, audioDevice, titleOverride string) (*CastStatus, error) {
+	a.castMu.Lock()
+	defer a.castMu.Unlock()
+
+	dev, srv, err := a.castTarget(udn)
+	if err != nil {
+		return nil, err
+	}
+	if videoDevice == "" {
+		return nil, fmt.Errorf("请先点「检测摄像头」并选择摄像头")
+	}
+	if !media.HasFFmpeg() {
+		return nil, fmt.Errorf("%w；摄像头采集需要它实时转码", media.MissingToolError("ffmpeg"))
+	}
+
+	caps := a.deviceCapabilities(dev)
+	plan := media.PlanForCamera(caps)
+	title := a.effectiveCastTitle("摄像头", titleOverride)
+	sessionID := srv.AddCamera(videoDevice, audioDevice, title, plan)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	ip, err := netutil.LANIP()
+	if err != nil {
+		srv.Remove(sessionID)
+		return nil, fmt.Errorf("获取本机局域网地址失败: %w", err)
+	}
+	playURL := srv.URL(ip, sessionID, false)
+	a.logf("摄像头投屏 设备=%s %s", dev.FriendlyName, media.CameraLabel(videoDevice, audioDevice))
+	return a.startCast(dev, srv, sessionID, title, playURL, plan.OutputMIME(), string(plan.Mode), ctx)
+}

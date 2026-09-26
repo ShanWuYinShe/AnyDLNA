@@ -19,6 +19,10 @@
         <string>iconfile</string>
         <key>LSMinimumSystemVersion</key>
         <string>10.13.0</string>
+        <key>NSCameraUsageDescription</key>
+        <string>AnyDLNA 需要使用摄像头，把画面实时投屏到电视。</string>
+        <key>NSMicrophoneUsageDescription</key>
+        <string>AnyDLNA 需要使用麦克风，把声音随画面一起投屏到电视。</string>
         <key>NSHighResolutionCapable</key>
         <string>true</string>
         <key>NSHumanReadableCopyright</key>

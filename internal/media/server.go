@@ -88,6 +88,16 @@ func (s *StreamServer) AddTranscode(path, title string, plan Plan) string {
 	})
 }
 
+// AddCamera 注册摄像头实时采集会话（macOS avfoundation），返回会话 ID。
+// videoDevice / audioDevice 为设备序号；audioDevice 为空表示不采集声音。
+func (s *StreamServer) AddCamera(videoDevice, audioDevice, title string, plan Plan) string {
+	return s.add(&session{
+		id: newSessionID(), direct: false,
+		mime: plan.OutputMIME(), title: title,
+		tc: NewCameraTranscoder(videoDevice, audioDevice, plan),
+	})
+}
+
 // AddTranscodeURL 注册在线视频流会话。Go 传输模式（见 NeedsPipeMode 之外的站点）：
 // yt-dlp 只解析，直链由 Go 原生拉取并在本机服务，ffmpeg 以 HTTP 输入读取；
 // 注册时同步预热传输，失败直接返回错误，让投屏点击时就能发现问题，

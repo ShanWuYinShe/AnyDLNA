@@ -10,6 +10,10 @@ export function Cast(arg1, arg2, arg3) {
   return window['go']['main']['App']['Cast'](arg1, arg2, arg3);
 }
 
+export function CastCamera(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['CastCamera'](arg1, arg2, arg3, arg4);
+}
+
 export function CastURL(arg1, arg2, arg3) {
   return window['go']['main']['App']['CastURL'](arg1, arg2, arg3);
 }
@@ -44,6 +48,10 @@ export function GetCookieStatus() {
 
 export function GetVolume() {
   return window['go']['main']['App']['GetVolume']();
+}
+
+export function ListCameras() {
+  return window['go']['main']['App']['ListCameras']();
 }
 
 export function LoginBrowserStatus() {

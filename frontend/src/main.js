@@ -587,6 +587,67 @@ async function stopCast() {
     stopControls();
 }
 
+// ---------- 摄像头 ----------
+
+// fillSourceSelect 用检测到的设备填充下拉；无设备时显示占位并禁用。
+function fillSourceSelect(sel, items, emptyLabel) {
+    sel.innerHTML = '';
+    if (!items.length) {
+        const opt = document.createElement('option');
+        opt.value = '';
+        opt.textContent = emptyLabel;
+        sel.appendChild(opt);
+        sel.disabled = true;
+        return;
+    }
+    sel.disabled = false;
+    items.forEach((d) => {
+        const opt = document.createElement('option');
+        opt.value = d.index;
+        opt.textContent = d.name;
+        sel.appendChild(opt);
+    });
+}
+
+// listCameras 检测本机摄像头与麦克风；首次调用会触发系统权限弹窗。
+async function listCameras() {
+    const btn = $('btnListCameras');
+    btn.disabled = true;
+    btn.textContent = '检测中…';
+    try {
+        const devs = await call('ListCameras');
+        const cams = devs.filter((d) => d.kind === 'video');
+        const mics = devs.filter((d) => d.kind === 'audio');
+        fillSourceSelect($('cameraSelect'), cams, '未检测到摄像头');
+        fillSourceSelect($('micSelect'), mics, '不使用麦克风');
+        $('btnCastCamera').disabled = cams.length === 0;
+        if (!cams.length) toast('未检测到摄像头：请确认已连接并在系统权限中允许');
+    } catch { /* toast 已提示 */ }
+    finally {
+        btn.disabled = false;
+        btn.textContent = '检测摄像头';
+    }
+}
+
+// castCamera 把选中的摄像头（可选麦克风）实时投到当前设备。
+async function castCamera() {
+    if (!state.selectedUDN) { toast('请先选择一台播放设备'); return; }
+    const video = $('cameraSelect').value;
+    if (!video) { toast('请先点「检测摄像头」并选择摄像头'); return; }
+    const btn = $('btnCastCamera');
+    btn.disabled = true;
+    btn.textContent = '正在投屏…';
+    try {
+        const st = await call('CastCamera', state.selectedUDN, video, $('micSelect').value || '', '');
+        startControls(st);
+        toast('摄像头已投屏；实时采集不支持进度拖动');
+    } catch { /* toast 已提示 */ }
+    finally {
+        btn.disabled = false;
+        btn.textContent = '摄像头投屏';
+    }
+}
+
 // ---------- 事件绑定 ----------
 
 $('btnSearch').onclick = searchDevices;
@@ -595,6 +656,8 @@ $('deviceIp').onkeydown = (e) => { if (e.key === 'Enter') addDeviceManually(); }
 $('btnPick').onclick = pickVideo;
 $('btnResolve').onclick = resolveURL;
 $('urlInput').onkeydown = (e) => { if (e.key === 'Enter') resolveURL(); };
+$('btnListCameras').onclick = listCameras;
+$('btnCastCamera').onclick = castCamera;
 $('btnCast').onclick = cast;
 $('btnStop').onclick = stopCast;
 $('btnPlayPause').onclick = () => call('PlayPause').catch(() => {});

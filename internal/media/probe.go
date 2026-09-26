@@ -228,6 +228,12 @@ func PlanForOnline(videoCodec, audioCodec string, caps DeviceCapabilities) Plan 
 	}, caps)
 }
 
+// PlanForCamera 返回摄像头实时采集的输出方案：原始采集帧没有已编码轨道
+// 可复制，始终完整转码；容器按设备能力在 MPEG-TS / 碎片化 MP4 间选择。
+func PlanForCamera(caps DeviceCapabilities) Plan {
+	return Plan{Mode: OutputTranscode, Container: outputContainerFor(caps)}
+}
+
 // planInput 汇总决策所需的全部输入。
 type planInput struct {
 	container   string // 源容器（本地文件）

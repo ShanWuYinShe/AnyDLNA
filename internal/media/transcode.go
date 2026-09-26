@@ -44,13 +44,14 @@ func NeedsPipeMode(extractor string) bool {
 // plan 决定输出方式：可直通的轨道用 -c copy 复制，避免不必要的重编码。
 type Transcoder struct {
 	mu      sync.Mutex
-	path    string  // 本地文件路径；为空表示在线源
-	srcURL  string  // 在线视频页面/流地址（直链模式只用于解析，管道模式用于下载）
-	isLive  bool    // 直播流（不支持跳转）
-	opts    Options // 在线源的代理与 Cookies 配置
-	plan    Plan    // 输出方式（换封装 / 转码）
-	offset  int64   // 转码起始位置（毫秒），供下一次启动使用
-	pipe    bool    // 管道模式：yt-dlp 下载经管道喂 ffmpeg；否则 Go 传输模式
+	path    string        // 本地文件路径；为空表示在线源
+	srcURL  string        // 在线视频页面/流地址（直链模式只用于解析，管道模式用于下载）
+	isLive  bool          // 直播流（不支持跳转）
+	opts    Options       // 在线源的代理与 Cookies 配置
+	plan    Plan          // 输出方式（换封装 / 转码）
+	offset  int64         // 转码起始位置（毫秒），供下一次启动使用
+	pipe    bool          // 管道模式：yt-dlp 下载经管道喂 ffmpeg；否则 Go 传输模式
+	camera  *CameraSource // 非空表示摄像头实时采集源（macOS avfoundation）
 	streams map[*stream]struct{}
 
 	// cachedURLs 是已解析的直链（1 条为一体流，2 条为分离音视频），
@@ -87,6 +88,13 @@ type stream struct {
 // plan 决定是否复制视频/音频轨道；零值 Plan 视为完整转码。
 func NewTranscoder(path string, plan Plan) *Transcoder {
 	return &Transcoder{path: path, plan: plan.orTranscode()}
+}
+
+// NewCameraTranscoder 创建摄像头实时采集会话：avfoundation 采集原始帧，
+// 实时转码为 H.264/AAC（原始帧没有已编码轨道，plan 的 copy 项被忽略，
+// 容器按设备能力在 TS / 碎片化 MP4 间选择，见 PlanForCamera）。
+func NewCameraTranscoder(video, audio string, plan Plan) *Transcoder {
+	return &Transcoder{camera: &CameraSource{VideoDevice: video, AudioDevice: audio}, plan: plan.orTranscode()}
 }
 
 // NewURLTranscoder 创建针对在线视频源的转码器。
@@ -198,6 +206,16 @@ func (t *Transcoder) StreamTo(w io.Writer) (cancel func(), done <-chan struct{},
 
 	stderr := new(limitBuffer)
 	args := []string{"-hide_banner", "-loglevel", "error"}
+
+	if t.camera != nil {
+		// 摄像头源：avfoundation 实时采集 + 实时转码。直播性质——不支持
+		// 定位与缓存，电视端重拉即重新起播当前画面。
+		Diagf("摄像头采集启动 %s", CameraLabel(t.camera.VideoDevice, t.camera.AudioDevice))
+		args = append(args, cameraInputArgs(t.camera)...)
+		cmd := toolCmd("ffmpeg", append(args, outputArgs(t.plan, 0)...)...)
+		setProcGroup(cmd)
+		return t.launchLocked(cmd, nil, nil, w, stderr)
+	}
 
 	if t.srcURL == "" {
 		// 本地文件源：ffmpeg 直接读取，支持输入级快速定位。
