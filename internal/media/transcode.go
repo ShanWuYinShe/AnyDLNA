@@ -2,6 +2,7 @@ package media
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -326,10 +327,11 @@ func (t *Transcoder) StreamTo(w io.Writer) (cancel func(), done <-chan struct{},
 	return t.launchLocked(cmd, nil, nil, w, stderr)
 }
 
-// streamCameraLocked 从常驻采集 hub 分发实时流给本次连接。
+// streamCameraLocked 从常驻采集 hub 的环形缓冲读取实时流写入本次连接。
 // 首次调用（或上次采集异常退出后）启动采集进程；其后的连接/断开只是
-// 消费者增减。返回的 cancel 只注销本次消费者；done 在流结束（hub 关闭
-// 或采集进程退出且缓冲耗尽）时关闭。
+// 游标读取者的增减，绝不触碰独占的摄像头设备。
+// 返回的 cancel 为空操作（电视端断开由 Write 错误感知，采集进程随会话
+// Stop 回收）；done 在流结束（电视端断开后无新数据、或 hub 关闭）时关闭。
 // 调用方须持有 t.mu。
 func (t *Transcoder) streamCameraLocked(w io.Writer) (func(), <-chan struct{}, error) {
 	if t.cameraHub == nil || t.cameraHub.finished() {
@@ -340,19 +342,14 @@ func (t *Transcoder) streamCameraLocked(w io.Writer) (func(), <-chan struct{}, e
 		t.cameraHub = hub
 		Diagf("摄像头采集启动 %s", CameraLabel(t.camera.VideoDevice, t.camera.AudioDevice))
 	}
-	ch, unsub := t.cameraHub.subscribe()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		defer unsub()
-		for chunk := range ch {
-			if _, err := w.Write(chunk); err != nil {
-				return // 电视端断开：仅注销消费者，采集不受影响
-			}
+		if err := t.cameraHub.streamTo(w); err != nil && !errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, cameraErrLagged) {
+			Diagf("摄像头分发结束: %v", err)
 		}
 	}()
-	cancel := func() { unsub() }
-	return cancel, done, nil
+	return func() {}, done, nil
 }
 
 // directURLsLocked 返回本次拉流可用的直链（1 条一体流或 2 条分离音视频），

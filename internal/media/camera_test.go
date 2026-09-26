@@ -1,7 +1,7 @@
 package media
 
 import (
-	"sync"
+	"io"
 	"testing"
 	"time"
 )
@@ -64,86 +64,73 @@ func TestPlanForCamera(t *testing.T) {
 	}
 }
 
-// TestCameraHubFanout 常规分发两消费者各收全部块；慢消费者缓冲塞满后
-// 整块丢弃且 dispatch 不阻塞（死锁会被 go test 超时杀死）；注销后不再收到。
-func TestCameraHubFanout(t *testing.T) {
+// TestCameraHubRing 逐项验证环形缓冲语义：顺序读取、跨环绕分段拷贝、
+// 游标被覆盖时返回 lagged、无新数据时阻塞等待、stop 后立即关闭。
+func TestCameraHubRing(t *testing.T) {
 	h := newCameraHub(&CameraSource{VideoDevice: "0"}, Plan{})
-	ch1, unsub1 := h.subscribe()
-	defer unsub1()
-	ch2, unsub2 := h.subscribe()
-	defer unsub2()
+	h.ring = make([]byte, 16) // 缩小容量便于构造覆盖场景
 
-	// 常规分发：两个消费者各收到全部块。
-	const n = 3
-	for i := 0; i < n; i++ {
-		h.dispatch([]byte("block"))
-	}
-	for i := 0; i < n; i++ {
-		if b := <-ch1; string(b) != "block" {
-			t.Fatalf("消费 1 第 %d 块异常: %q", i, b)
-		}
-		if b := <-ch2; string(b) != "block" {
-			t.Fatalf("消费 2 第 %d 块异常: %q", i, b)
-		}
+	// 顺序读取。
+	h.write([]byte("hello"))
+	buf := make([]byte, 16)
+	n, pos, err := h.read(0, buf)
+	if err != nil || string(buf[:n]) != "hello" || pos != 5 {
+		t.Fatalf("顺序读取异常: n=%d pos=%d err=%v data=%q", n, pos, err, buf[:n])
 	}
 
-	// 慢消费者语义：600 块远超 256 缓冲，未读的一方整块丢弃；dispatch
-	// 必须不阻塞（若阻塞，本测试会被 go test 的 10 分钟超时杀死）。
-	for i := 0; i < 600; i++ {
-		h.dispatch([]byte("drop"))
+	// 跨环绕写入后再读：数据必须连续。
+	h.write([]byte("world!!!")) // head=13，环形布局 [!!!o world...]
+	n, pos, err = h.read(5, buf)
+	if err != nil || string(buf[:n]) != "world!!!" || pos != 13 {
+		t.Fatalf("跨环绕读取异常: n=%d pos=%d err=%v data=%q", n, pos, err, buf[:n])
 	}
 
-	// 注销后 channel 关闭：缓冲中的旧块仍可读出，排空后立即得到关闭信号，
-	// 且不再有新块投递。
-	unsub1()
-	for {
-		if _, ok := <-ch1; !ok {
-			break
-		}
-	}
-	h.dispatch([]byte("after-unsub"))
-	if b, ok := <-ch1; ok {
-		t.Errorf("已注销消费者不应再收到数据: %q", b)
+	// 游标被覆盖（pos=5，head=13，容量 16，再写 12 字节后 5 < 13+12-16=9……
+	// 直接构造：写满一整圈使 pos 落到覆盖区。
+	h.write(make([]byte, 12)) // head=25
+	if _, _, err := h.read(5, buf); err != cameraErrLagged {
+		t.Fatalf("游标被覆盖应返回 lagged，实际 %v", err)
 	}
 
-	// 排空 ch2 的丢弃积压后，应能继续收到新块（丢弃机制未卡死 channel）。
-	for len(ch2) > 0 {
-		<-ch2
-	}
-	h.dispatch([]byte("final"))
-	if b := <-ch2; string(b) != "final" {
-		t.Errorf("未注销消费者应能继续收到新块: %q", b)
-	}
-}
-
-// TestCameraHubCloseSubsOnEnd 采集进程退出（closeSubs）后，
-// 全部订阅者的 channel 应关闭，消费者循环随之结束。
-func TestCameraHubCloseSubsOnEnd(t *testing.T) {
-	h := newCameraHub(&CameraSource{VideoDevice: "0"}, Plan{})
-	ch, unsub := h.subscribe()
-	defer unsub()
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-	ended := make(chan struct{})
-	go func() {
-		defer wg.Done()
-		for range ch {
-		}
-		close(ended)
-	}()
-
+	// 从当前尾部读取：正常。
 	h.mu.Lock()
-	for c := range h.subs {
-		close(c)
-	}
-	h.subs = map[chan []byte]struct{}{}
+	head := h.head
 	h.mu.Unlock()
-
-	select {
-	case <-ended:
-	case <-time.After(time.Second):
-		t.Fatal("channel 关闭后消费者循环应结束")
+	n, _, err = h.read(head-4, buf)
+	if err != nil || n != 4 {
+		t.Fatalf("尾部读取异常: n=%d err=%v", n, err)
 	}
-	wg.Wait()
+
+	// 无新数据时阻塞，写入后唤醒。
+	got := make(chan string, 1)
+	go func() {
+		h.mu.Lock()
+		pos := h.head
+		h.mu.Unlock()
+		n, _, err := h.read(pos, buf)
+		if err != nil {
+			got <- "ERR:" + err.Error()
+			return
+		}
+		got <- string(buf[:n])
+	}()
+	time.Sleep(50 * time.Millisecond) // 让消费者进入等待
+	h.write([]byte("wake"))
+	select {
+	case s := <-got:
+		if s != "wake" {
+			t.Errorf("唤醒后读到 %q, want wake", s)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("阻塞的读取未被写入唤醒")
+	}
+
+	// stop 后读取立即返回关闭错误。
+	h.stop()
+	h.mu.Lock()
+	pos2 := h.head
+	h.mu.Unlock()
+	if _, _, err := h.read(pos2, buf); err != io.ErrClosedPipe {
+		t.Fatalf("stop 后读取应返回 ErrClosedPipe，实际 %v", err)
+	}
 }
