@@ -210,9 +210,34 @@ func (t *Transcoder) StreamTo(w io.Writer) (cancel func(), done <-chan struct{},
 	if t.camera != nil {
 		// 摄像头源：avfoundation 实时采集 + 实时转码。直播性质——不支持
 		// 定位与缓存，电视端重拉即重新起播当前画面。
+		//
+		// 摄像头是独占设备：电视端播放中会周期性断开重连（DLNA 直播流
+		// 常见，还包括先探测后播放的连接模式），每次重连都会再走一次
+		// StreamTo。若不先回收旧采集进程，新 ffmpeg 打不开摄像头，
+		// 表现为电视端周期性卡顿加载——先终止并等待旧进程真正退出。
+		t.stopAllLocked()
+		deadline := time.Now().Add(2 * time.Second)
+		for len(t.streams) > 0 && time.Now().Before(deadline) {
+			for s := range t.streams {
+				select {
+				case <-s.done:
+					delete(t.streams, s)
+				default:
+				}
+			}
+			if len(t.streams) > 0 {
+				time.Sleep(20 * time.Millisecond)
+			}
+		}
+
 		Diagf("摄像头采集启动 %s", CameraLabel(t.camera.VideoDevice, t.camera.AudioDevice))
 		args = append(args, cameraInputArgs(t.camera)...)
-		cmd := toolCmd("ffmpeg", append(args, outputArgs(t.plan, 0)...)...)
+		args = append(args, outputArgs(t.plan, 0)...)
+		// 直播 GOP：libx264 默认 250 帧一个 I 帧（30fps 下约 8.3 秒），电视端
+		// 缓冲重同步/中途加入都要等 I 帧，表现为周期性卡顿加载；收紧到 2 秒，
+		// 并启用 zerolatency 关闭 B 帧与编码器内部缓冲，降低采集端延迟。
+		args = append(args, "-g", "60", "-keyint_min", "60", "-tune", "zerolatency")
+		cmd := toolCmd("ffmpeg", args...)
 		setProcGroup(cmd)
 		return t.launchLocked(cmd, nil, nil, w, stderr)
 	}

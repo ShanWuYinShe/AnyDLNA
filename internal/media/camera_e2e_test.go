@@ -82,3 +82,96 @@ readLoop:
 		t.Fatalf("0x47 密度过低，不像 MPEG-TS 流: %d 字节中仅 %d 个同步字节", total, syncCount)
 	}
 }
+
+// TestCameraReconnectStaysLive 电视端会周期性断开重连（旧连接的采集进程
+// 可能尚未完全退出）：摄像头是独占设备，重连时必须先回收旧进程再启动新的，
+// 否则新 ffmpeg 打不开设备、电视端出现周期性加载。复现方式：第一个连接
+// 保持活动时直接开第二个连接，第二个必须能正常产出流。
+func TestCameraReconnectStaysLive(t *testing.T) {
+	if os.Getenv("ANYDLNA_CAMERA_ITEST") == "" {
+		t.Skip("需要真实摄像头：设 ANYDLNA_CAMERA_ITEST=1 启用")
+	}
+	devs, err := ListCameras(context.Background())
+	if err != nil {
+		t.Fatalf("枚举采集设备失败: %v", err)
+	}
+	var video string
+	for _, d := range devs {
+		if d.Kind == "video" {
+			video = d.Index
+			break
+		}
+	}
+	if video == "" {
+		t.Skip("未检测到摄像头设备")
+	}
+
+	tc := NewCameraTranscoder(video, "", Plan{Mode: OutputTranscode, Container: ContainerMPEGTS})
+
+	// 第一个连接：读 1 秒，保持活动（不 cancel）。
+	pr1, pw1 := io.Pipe()
+	cancel1, done1, err := tc.StreamTo(pw1)
+	if err != nil {
+		t.Fatalf("第一个连接启动失败: %v", err)
+	}
+	defer cancel1()
+	defer pw1.Close()
+	buf1 := make([]byte, 16*1024)
+	deadline := time.After(1 * time.Second)
+read1:
+	for {
+		select {
+		case <-deadline:
+			break read1
+		case <-done1:
+			t.Fatal("第一个连接提前退出")
+		default:
+		}
+		if _, err := pr1.Read(buf1); err == io.EOF {
+			break read1
+		}
+	}
+
+	// 第二个连接：重连必须成功且持续产出（修复前会因摄像头被旧进程占用而失败）。
+	pr2, pw2 := io.Pipe()
+	cancel2, done2, err := tc.StreamTo(pw2)
+	if err != nil {
+		t.Fatalf("重连启动失败: %v", err)
+	}
+	defer cancel2()
+	defer pw2.Close()
+
+	deadline2 := time.After(2 * time.Second)
+	buf2 := make([]byte, 32*1024)
+	total, syncCount := 0, 0
+read2:
+	for {
+		select {
+		case <-deadline2:
+			break read2
+		case <-done2:
+			t.Fatal("重连的采集进程提前退出（疑似摄像头仍被旧进程占用）")
+		default:
+		}
+		n, rerr := pr2.Read(buf2)
+		total += n
+		for _, b := range buf2[:n] {
+			if b == 0x47 {
+				syncCount++
+			}
+		}
+		if rerr == io.EOF {
+			break read2
+		}
+		if rerr != nil {
+			t.Fatalf("重连读取流失败: %v", rerr)
+		}
+	}
+	if total < 32*1024 {
+		t.Fatalf("重连后 2 秒产出过少: %d 字节", total)
+	}
+	if syncCount < total/188/2 {
+		t.Fatalf("重连流 0x47 密度过低: %d 字节中仅 %d 个同步字节", total, syncCount)
+	}
+	cancel1()
+}
