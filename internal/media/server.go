@@ -176,14 +176,21 @@ func (s *StreamServer) serveTranscode(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	// 连接生命周期诊断：电视端周期性断开重连（DLNA 直播流常态）时，
+	// 这两条日志能直接呈现连接模式——多久断一次、每次收了多少字节。
+	connStart := time.Now()
+	var connBytes int64
+	log.Printf("拉流开始 %s（会话 %s）", r.URL.Path, sess.id)
+
 	// 使用会话注册时的容器类型：可能是 MPEG-TS，也可能是碎片化 MP4。
 	w.Header().Set("Content-Type", sess.mime)
 	w.Header().Set("Connection", "close")
 	w.WriteHeader(http.StatusOK)
 	// 主动 flush，让电视端尽快收到数据开始起播。
-	flushWriter{w}.flushHeader()
+	counting := &countingFlushWriter{w: flushWriter{w}}
+	counting.flushHeader()
 
-	cancel, done, err := sess.tc.StreamTo(flushWriter{w})
+	cancel, done, err := sess.tc.StreamTo(counting)
 	if err != nil {
 		// 响应头已发出，只能中断连接；电视端表现为无法播放。
 		log.Printf("转码启动失败: %v", err)
@@ -195,9 +202,34 @@ func (s *StreamServer) serveTranscode(w http.ResponseWriter, r *http.Request) {
 	case <-done:
 	}
 	cancel()
+	connBytes = counting.bytes()
+	log.Printf("拉流结束 %s（会话 %s）：时长 %s，送达 %d 字节",
+		r.URL.Path, sess.id, time.Since(connStart).Round(time.Millisecond), connBytes)
 	if msg := sess.tc.LastStderr(); msg != "" {
 		log.Printf("转码进程输出: %s", msg)
 	}
+}
+
+// countingFlushWriter 在 flushWriter 基础上统计送达字节数（连接诊断用）。
+type countingFlushWriter struct {
+	w  flushWriter
+	n  int64
+	mu sync.Mutex
+}
+
+func (c *countingFlushWriter) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	c.n += int64(len(p))
+	c.mu.Unlock()
+	return c.w.Write(p)
+}
+
+func (c *countingFlushWriter) flushHeader() { c.w.flushHeader() }
+
+func (c *countingFlushWriter) bytes() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n
 }
 
 // flushWriter 在每次写入后主动 Flush，把转码输出尽快推给电视端。

@@ -19,6 +19,7 @@ import (
 	"errors"
 	"io"
 	"os/exec"
+	"strings"
 	"sync"
 )
 
@@ -33,10 +34,12 @@ var cameraErrLagged = errors.New("摄像头消费者落后于实时流")
 // cameraOutputArgs 摄像头输出的编码与封装参数：完整转码 + 直播短 GOP +
 // CBR 恒定码率。CBR 是 IPTV 直播 TS 的标准做法：码率恒定让电视端缓冲
 // 管理稳定，避免 VBR 突发触发电视端「缓冲满即断流重连」的行为。
+// 全部编码参数必须在 containerArgs（以输出文件名结尾）之前给出。
 func cameraOutputArgs(plan Plan) []string {
-	args := outputArgs(plan, 0)
+	args := codecArgs(plan, 0)
 	args = append(args, "-g", "60", "-keyint_min", "60", "-tune", "zerolatency")
-	return append(args, "-muxrate", "3M", "-muxdelay", "0")
+	args = append(args, "-muxrate", "3M", "-muxdelay", "0")
+	return append(args, containerArgs(plan.Container)...)
 }
 
 // cameraHub 管理一路常驻采集进程与环形缓冲。
@@ -63,7 +66,9 @@ func newCameraHub(src *CameraSource, plan Plan) *cameraHub {
 
 // start 启动常驻采集进程并开始填充环形缓冲。
 func (h *cameraHub) start() error {
-	cmd := toolCmd("ffmpeg", append(cameraInputArgs(h.src), cameraOutputArgs(h.plan)...)...)
+	args := append(cameraInputArgs(h.src), cameraOutputArgs(h.plan)...)
+	Diagf("摄像头采集命令: ffmpeg %s", strings.Join(args, " "))
+	cmd := toolCmd("ffmpeg", args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err

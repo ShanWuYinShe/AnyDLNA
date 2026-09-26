@@ -532,6 +532,14 @@ func (t *Transcoder) PrefetchDirect(ctx context.Context) error {
 // audioInput 是音频所在输入的序号：单输入（本地文件/旧链路）为 0，
 // 在线双管道拉流时视频在 pipe:0、音频在 pipe:3 对应的第 1 个输入。
 func outputArgs(plan Plan, audioInput int) []string {
+	return append(codecArgs(plan, audioInput), containerArgs(plan.Container)...)
+}
+
+// codecArgs 构造输出流编解码相关的 ffmpeg 参数（不含容器封装与输出文件名）。
+// 单独拆出的原因：容器参数以「-f mpegts pipe:1」（即输出文件名）结尾，
+// ffmpeg 会忽略输出文件名之后出现的全部选项——摄像头直播的 GOP/CBR 等
+// 额外编码参数必须插在它之前才能生效（实测被忽略过，见 cameraOutputArgs）。
+func codecArgs(plan Plan, audioInput int) []string {
 	args := []string{"-map", "0:v:0", "-map", strconv.Itoa(audioInput) + ":a:0?", "-sn", "-dn"}
 
 	if plan.CopyVideo {
@@ -548,7 +556,7 @@ func outputArgs(plan Plan, audioInput int) []string {
 		args = append(args, "-c:a", "aac", "-b:a", "192k", "-ac", "2")
 	}
 
-	return append(args, containerArgs(plan.Container)...)
+	return args
 }
 
 // containerArgs 返回目标容器的封装参数。

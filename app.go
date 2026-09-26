@@ -1240,6 +1240,13 @@ func (a *App) CastCamera(udn, videoDevice, audioDevice, titleOverride string) (*
 	title := a.effectiveCastTitle("摄像头", titleOverride)
 	sessionID := srv.AddCamera(videoDevice, audioDevice, title, plan)
 
+	// 协商依据留痕：容器选择规则 = 设备声明支持 MPEG-TS 时优先 TS
+	//（直播标准、封装开销最小、延迟最低），否则声明支持碎片化 MP4 时用它，
+	// 都没有时仍回退 TS（绝大多数 DLNA 设备都能解）。
+	a.logf("摄像头投屏 设备=%s %s 协商容器=%s（设备声明 %d 种视频格式）",
+		dev.FriendlyName, media.CameraLabel(videoDevice, audioDevice),
+		plan.Container, len(caps.MIMEs))
+
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	ip, err := netutil.LANIP()
@@ -1248,6 +1255,5 @@ func (a *App) CastCamera(udn, videoDevice, audioDevice, titleOverride string) (*
 		return nil, fmt.Errorf("获取本机局域网地址失败: %w", err)
 	}
 	playURL := srv.URL(ip, sessionID, false)
-	a.logf("摄像头投屏 设备=%s %s", dev.FriendlyName, media.CameraLabel(videoDevice, audioDevice))
 	return a.startCast(dev, srv, sessionID, title, playURL, plan.OutputMIME(), string(plan.Mode), ctx)
 }
