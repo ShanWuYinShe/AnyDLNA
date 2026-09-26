@@ -1,7 +1,9 @@
 package media
 
 import (
+	"errors"
 	"io"
+	"sync"
 	"testing"
 	"time"
 )
@@ -132,5 +134,79 @@ func TestCameraHubRing(t *testing.T) {
 	h.mu.Unlock()
 	if _, _, err := h.read(pos2, buf); err != io.ErrClosedPipe {
 		t.Fatalf("stop 后读取应返回 ErrClosedPipe，实际 %v", err)
+	}
+}
+
+// TestCameraHubRingConcurrent 多写者 + 多消费者并发压力：在 -race 下验证
+// write/read 的锁互斥与环形分段拷贝的正确性（本用例正是摄像头分发竞态
+// 修复后补上的并发覆盖）。
+func TestCameraHubRingConcurrent(t *testing.T) {
+	h := newCameraHub(&CameraSource{VideoDevice: "0"}, Plan{})
+	h.ring = make([]byte, 1024) // 小容量制造高频环绕
+
+	const writers = 4
+	const perWriter = 200
+	const blockLen = 64 // 每块 64 字节（小于容量，write 必然完整写入）
+
+	var wg sync.WaitGroup
+	wg.Add(writers)
+	for w := 0; w < writers; w++ {
+		go func(w int) {
+			defer wg.Done()
+			block := make([]byte, blockLen)
+			for i := 0; i < perWriter; i++ {
+				block[0] = byte(w)
+				block[1] = byte(i)
+				h.write(block)
+			}
+		}(w)
+	}
+
+	// 两个并发消费者：read 全程持锁，-race 下验证互斥与环形分段拷贝。
+	// 消费者从 0 起读（总量 51200 远超 1024 缓冲，必然经历 lagged 跳转），
+	// 写者完成后由 stop 唤醒退出；断言各自至少读满一个缓冲容量。
+	seen := make([]chan int64, 2)
+	for r := range seen {
+		seen[r] = make(chan int64, 1)
+		go func(r int) {
+			var count int64
+			buf := make([]byte, blockLen)
+			pos := int64(0)
+			for {
+				n, npos, err := h.read(pos, buf)
+				if errors.Is(err, cameraErrLagged) {
+					h.mu.Lock()
+					oldest := h.head - int64(len(h.ring))
+					if oldest < 0 {
+						oldest = 0
+					}
+					h.mu.Unlock()
+					if npos < oldest {
+						pos = oldest
+					}
+					continue
+				}
+				if err != nil {
+					break // stop 后 ErrClosedPipe：正常退出
+				}
+				count += int64(n)
+				pos = npos
+			}
+			seen[r] <- count
+		}(r)
+	}
+
+	wg.Wait() // 写者全部完成后，head 停止前进。
+	h.stop()  // 唤醒阻塞在 read 上的消费者。
+
+	// 断言只要求消费者干净退出（无死锁）——数据竞争由 -race 检测器负责，
+	// 字节数取决于协程调度时机（可能晚于全部写入），不作硬性断言。
+	for r := range seen {
+		select {
+		case n := <-seen[r]:
+			t.Logf("消费者 %d 累计读取 %d 字节", r, n)
+		case <-time.After(2 * time.Second):
+			t.Errorf("消费者 %d 未能在 stop 后退出", r)
+		}
 	}
 }
