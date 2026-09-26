@@ -197,14 +197,19 @@ func (s *StreamServer) serveTranscode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 阻塞保持响应打开：客户端断开（停止/Seek）或转码进程退出（播放完毕）时结束。
+	// 断开原因必须区分：电视端主动断开（缓冲满/超时后的重连前兆）与服务端
+	// 流结束（采集异常）指向完全不同的排查方向。
 	select {
 	case <-r.Context().Done():
+		connBytes = counting.bytes()
+		log.Printf("拉流结束 %s（会话 %s）：电视端断开，时长 %s，送达 %d 字节",
+			r.URL.Path, sess.id, time.Since(connStart).Round(time.Millisecond), connBytes)
 	case <-done:
+		connBytes = counting.bytes()
+		log.Printf("拉流结束 %s（会话 %s）：服务端流结束，时长 %s，送达 %d 字节",
+			r.URL.Path, sess.id, time.Since(connStart).Round(time.Millisecond), connBytes)
 	}
 	cancel()
-	connBytes = counting.bytes()
-	log.Printf("拉流结束 %s（会话 %s）：时长 %s，送达 %d 字节",
-		r.URL.Path, sess.id, time.Since(connStart).Round(time.Millisecond), connBytes)
 	if msg := sess.tc.LastStderr(); msg != "" {
 		log.Printf("转码进程输出: %s", msg)
 	}
