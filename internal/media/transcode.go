@@ -43,16 +43,17 @@ func NeedsPipeMode(extractor string) bool {
 
 // plan 决定输出方式：可直通的轨道用 -c copy 复制，避免不必要的重编码。
 type Transcoder struct {
-	mu      sync.Mutex
-	path    string        // 本地文件路径；为空表示在线源
-	srcURL  string        // 在线视频页面/流地址（直链模式只用于解析，管道模式用于下载）
-	isLive  bool          // 直播流（不支持跳转）
-	opts    Options       // 在线源的代理与 Cookies 配置
-	plan    Plan          // 输出方式（换封装 / 转码）
-	offset  int64         // 转码起始位置（毫秒），供下一次启动使用
-	pipe    bool          // 管道模式：yt-dlp 下载经管道喂 ffmpeg；否则 Go 传输模式
-	camera  *CameraSource // 非空表示摄像头实时采集源（macOS avfoundation）
-	streams map[*stream]struct{}
+	mu        sync.Mutex
+	path      string        // 本地文件路径；为空表示在线源
+	srcURL    string        // 在线视频页面/流地址（直链模式只用于解析，管道模式用于下载）
+	isLive    bool          // 直播流（不支持跳转）
+	opts      Options       // 在线源的代理与 Cookies 配置
+	plan      Plan          // 输出方式（换封装 / 转码）
+	offset    int64         // 转码起始位置（毫秒），供下一次启动使用
+	pipe      bool          // 管道模式：yt-dlp 下载经管道喂 ffmpeg；否则 Go 传输模式
+	camera    *CameraSource // 非空表示摄像头实时采集源（macOS avfoundation）
+	cameraHub *cameraHub    // 摄像头常驻采集分发器（随首次拉流启动，Stop 时关闭）
+	streams   map[*stream]struct{}
 
 	// cachedURLs 是已解析的直链（1 条为一体流，2 条为分离音视频），
 	// cachedAt 为解析时间，TTL 内复用，过期或跳转失败时重取。仅直链模式用。
@@ -124,6 +125,9 @@ func (p Plan) orTranscode() Plan {
 func (t *Transcoder) RestartAt(seconds float64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.camera != nil {
+		return // 摄像头实时源不支持定位（直播性质），忽略无意义的重启
+	}
 	if seconds < 0 {
 		seconds = 0
 	}
@@ -134,9 +138,13 @@ func (t *Transcoder) RestartAt(seconds float64) {
 // Stop 终止全部正在进行的拉流进程，并关闭 Go 传输的本机服务与缓存。
 func (t *Transcoder) Stop() {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	hub := t.cameraHub
+	t.cameraHub = nil
 	t.stopAllLocked()
 	t.closeDirectLocked()
+	t.mu.Unlock()
+	// hub.stop 会等采集进程退出，放锁外执行。
+	go hub.stop()
 }
 
 // closeDirectLocked 关闭 Go 传输的本机服务与上游拉取器；调用方须持有 t.mu。
@@ -208,38 +216,10 @@ func (t *Transcoder) StreamTo(w io.Writer) (cancel func(), done <-chan struct{},
 	args := []string{"-hide_banner", "-loglevel", "error"}
 
 	if t.camera != nil {
-		// 摄像头源：avfoundation 实时采集 + 实时转码。直播性质——不支持
-		// 定位与缓存，电视端重拉即重新起播当前画面。
-		//
-		// 摄像头是独占设备：电视端播放中会周期性断开重连（DLNA 直播流
-		// 常见，还包括先探测后播放的连接模式），每次重连都会再走一次
-		// StreamTo。若不先回收旧采集进程，新 ffmpeg 打不开摄像头，
-		// 表现为电视端周期性卡顿加载——先终止并等待旧进程真正退出。
-		t.stopAllLocked()
-		deadline := time.Now().Add(2 * time.Second)
-		for len(t.streams) > 0 && time.Now().Before(deadline) {
-			for s := range t.streams {
-				select {
-				case <-s.done:
-					delete(t.streams, s)
-				default:
-				}
-			}
-			if len(t.streams) > 0 {
-				time.Sleep(20 * time.Millisecond)
-			}
-		}
-
-		Diagf("摄像头采集启动 %s", CameraLabel(t.camera.VideoDevice, t.camera.AudioDevice))
-		args = append(args, cameraInputArgs(t.camera)...)
-		args = append(args, outputArgs(t.plan, 0)...)
-		// 直播 GOP：libx264 默认 250 帧一个 I 帧（30fps 下约 8.3 秒），电视端
-		// 缓冲重同步/中途加入都要等 I 帧，表现为周期性卡顿加载；收紧到 2 秒，
-		// 并启用 zerolatency 关闭 B 帧与编码器内部缓冲，降低采集端延迟。
-		args = append(args, "-g", "60", "-keyint_min", "60", "-tune", "zerolatency")
-		cmd := toolCmd("ffmpeg", args...)
-		setProcGroup(cmd)
-		return t.launchLocked(cmd, nil, nil, w, stderr)
+		// 摄像头源：常驻采集进程 + hub 实时分发。电视端连接/断开/重连
+		// 只是消费者增减，完全不触碰采集进程——摄像头是独占设备，且
+		// DLNA 直播流的并存连接（先探测后播放、播放中重连）是常态。
+		return t.streamCameraLocked(w)
 	}
 
 	if t.srcURL == "" {
@@ -344,6 +324,35 @@ func (t *Transcoder) StreamTo(w io.Writer) (cancel func(), done <-chan struct{},
 	cmd := toolCmd("ffmpeg", append(args, outputArgs(t.plan, 0)...)...)
 	setProcGroup(cmd)
 	return t.launchLocked(cmd, nil, nil, w, stderr)
+}
+
+// streamCameraLocked 从常驻采集 hub 分发实时流给本次连接。
+// 首次调用（或上次采集异常退出后）启动采集进程；其后的连接/断开只是
+// 消费者增减。返回的 cancel 只注销本次消费者；done 在流结束（hub 关闭
+// 或采集进程退出且缓冲耗尽）时关闭。
+// 调用方须持有 t.mu。
+func (t *Transcoder) streamCameraLocked(w io.Writer) (func(), <-chan struct{}, error) {
+	if t.cameraHub == nil || t.cameraHub.finished() {
+		hub := newCameraHub(t.camera, t.plan)
+		if err := hub.start(); err != nil {
+			return func() {}, nil, fmt.Errorf("启动摄像头采集失败（首次使用请在系统弹窗中授权摄像头/麦克风）: %w", err)
+		}
+		t.cameraHub = hub
+		Diagf("摄像头采集启动 %s", CameraLabel(t.camera.VideoDevice, t.camera.AudioDevice))
+	}
+	ch, unsub := t.cameraHub.subscribe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer unsub()
+		for chunk := range ch {
+			if _, err := w.Write(chunk); err != nil {
+				return // 电视端断开：仅注销消费者，采集不受影响
+			}
+		}
+	}()
+	cancel := func() { unsub() }
+	return cancel, done, nil
 }
 
 // directURLsLocked 返回本次拉流可用的直链（1 条一体流或 2 条分离音视频），

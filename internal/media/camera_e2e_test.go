@@ -83,10 +83,10 @@ readLoop:
 	}
 }
 
-// TestCameraReconnectStaysLive 电视端会周期性断开重连（旧连接的采集进程
-// 可能尚未完全退出）：摄像头是独占设备，重连时必须先回收旧进程再启动新的，
-// 否则新 ffmpeg 打不开设备、电视端出现周期性加载。复现方式：第一个连接
-// 保持活动时直接开第二个连接，第二个必须能正常产出流。
+// TestCameraReconnectStaysLive 电视端会周期性发起并存连接（先探测后播放、
+// 播放中重连）。hub 架构下并存连接只是新增消费者，采集进程不受影响：
+// 第一个连接保持活动时开第二个连接，两者都必须持续产出流。
+// （旧实现每次连接启动一份采集进程，第二个会抢占独占的摄像头导致失败。）
 func TestCameraReconnectStaysLive(t *testing.T) {
 	if os.Getenv("ANYDLNA_CAMERA_ITEST") == "" {
 		t.Skip("需要真实摄像头：设 ANYDLNA_CAMERA_ITEST=1 启用")
