@@ -51,6 +51,7 @@ func TestCameraStreamMonitor(t *testing.T) {
 		maxGap time.Duration
 		perSec map[int64]int64
 		gaps   []time.Duration
+		gapAt  []time.Duration
 	}{perSec: map[int64]int64{}}
 	st.start = time.Now()
 	st.last = st.start
@@ -72,6 +73,7 @@ func TestCameraStreamMonitor(t *testing.T) {
 				}
 				if gap > 500*time.Millisecond {
 					st.gaps = append(st.gaps, gap)
+					st.gapAt = append(st.gapAt, now.Sub(st.start).Round(time.Millisecond))
 				}
 				st.last = now
 				sec := int64(now.Sub(st.start).Seconds())
@@ -101,8 +103,12 @@ func TestCameraStreamMonitor(t *testing.T) {
 	avg := float64(st.total) / elapsed
 	t.Logf("总时长 %.1fs 总量 %d 字节 平均码率 %.0f KB/s", elapsed, st.total, avg/1024)
 	t.Logf("最大块间停滞 %v；超过 500ms 的停滞 %d 次", st.maxGap, len(st.gaps))
-	for _, g := range st.gaps {
-		t.Logf("  停滞: %v", g)
+	for i, g := range st.gaps {
+		at := ""
+		if i < len(st.gapAt) {
+			at = " @" + st.gapAt[i].String()
+		}
+		t.Logf("  停滞: %v%s", g, at)
 	}
 	line := ""
 	for sec := int64(0); sec < int64(runFor/time.Second); sec++ {
