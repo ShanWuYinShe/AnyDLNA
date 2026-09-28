@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -63,6 +64,128 @@ func TestCastStateSnapshot(t *testing.T) {
 	a.clearCastState()
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("清除后快照应不存在: %v", err)
+	}
+}
+
+// TestCameraCastSmoothness 用假电视量化摄像头直播的**持续平滑度**：
+// 投屏后每 250ms 采样假电视收流增量，持续 60 秒，统计：
+//   - 每秒速率分布（应为 VBR 数十至数百 KB/s）；
+//   - 连续无数据采样（>1 秒零增量即疑似电视端卡顿点）的次数与时长。
+//
+// 需要真实摄像头与 ffmpeg（ANYDLNA_CAMERA_ITEST=1 启用）。
+func TestCameraCastSmoothness(t *testing.T) {
+	if os.Getenv("ANYDLNA_CAMERA_ITEST") == "" {
+		t.Skip("需要真实摄像头：设 ANYDLNA_CAMERA_ITEST=1 启用")
+	}
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+
+	tv, err := faketv.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+	dev, err := dlna.Describe(ctx, http.DefaultClient, tv.DescriptionURL())
+	if err != nil {
+		t.Fatalf("读取假电视描述失败: %v", err)
+	}
+
+	app := NewApp()
+	srv, err := media.NewStreamServer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	app.streamSrv = srv
+	app.devices = append(app.devices, dev)
+
+	devs, err := media.ListCameras(ctx)
+	if err != nil {
+		t.Fatalf("枚举摄像头失败: %v", err)
+	}
+	videoIdx := ""
+	for _, d := range devs {
+		if d.Kind == "video" {
+			videoIdx = d.Index
+			break
+		}
+	}
+	if videoIdx == "" {
+		t.Skip("未检测到摄像头设备")
+	}
+
+	if _, err := app.CastCamera(dev.UDN, videoIdx, "", ""); err != nil {
+		t.Fatalf("投屏失败: %v", err)
+	}
+
+	// 采样 60 秒：每 250ms 读一次假电视收流增量。
+	const interval = 250 * time.Millisecond
+	const runFor = 60 * time.Second
+	var samples []int64
+	type stallInfo struct {
+		samples int
+		atSec   float64
+	}
+	var stalls []stallInfo
+	curStall := 0
+	stallStart := 0.0
+
+	prev, _, _ := tv.Stats()
+	start := time.Now()
+	for time.Since(start) < runFor {
+		time.Sleep(interval)
+		cur, _, _ := tv.Stats()
+		delta := cur - prev
+		prev = cur
+		samples = append(samples, delta)
+		if delta == 0 {
+			if curStall == 0 {
+				stallStart = time.Since(start).Seconds()
+			}
+			curStall++
+		} else if curStall > 0 {
+			stalls = append(stalls, stallInfo{samples: curStall, atSec: stallStart})
+			curStall = 0
+		}
+	}
+	if curStall > 0 {
+		stalls = append(stalls, stallInfo{samples: curStall, atSec: stallStart})
+	}
+
+	// 汇总输出：按秒折叠采样（4 个采样 = 1 秒），打印速率曲线。
+	var total int64
+	perSec := map[int]int64{}
+	for i, s := range samples {
+		total += s
+		perSec[i/4] += s
+	}
+	t.Logf("总量 %d 字节，平均 %.0f KB/s", total, float64(total)/60/1024)
+	line := ""
+	for sec := 0; sec < 60; sec++ {
+		line += itoaKb(perSec[sec]) + " "
+	}
+	t.Logf("每秒 KB: %s", line)
+	for _, s := range stalls {
+		t.Logf("停滞: @%.1fs 持续约 %d ms", s.atSec, s.samples*250)
+	}
+
+	// 断言：排除前 5 秒启动窗口（摄像头预热 + x264/lookahead 初始化）后，
+	// 不应有超过 2 秒的连续零增量（超过即电视端可感知的卡顿）。
+	for _, s := range stalls {
+		if s.samples > 8 && s.atSec > 5 {
+			t.Errorf("检测到 %.1fs 处的显著停滞（约 %d ms 无数据）", s.atSec, s.samples*250)
+		}
+	}
+	if total == 0 {
+		t.Fatal("假电视未收到任何数据")
+	}
+
+	if err := app.StopCast(); err != nil {
+		t.Fatalf("停止失败: %v", err)
 	}
 }
 
@@ -538,4 +661,16 @@ func TestCameraCastStopRecastWithFakeTV(t *testing.T) {
 	if err := app.StopCast(); err != nil {
 		t.Fatalf("第二次停止失败: %v", err)
 	}
+}
+
+// itoaKb 格式化为右对齐的 KB 整数（速率曲线打印用）。
+func itoaKb(n int64) string {
+	kb := n / 1024
+	if kb < 10 {
+		return "  " + strconv.Itoa(int(kb))
+	}
+	if kb < 100 {
+		return " " + strconv.Itoa(int(kb))
+	}
+	return strconv.Itoa(int(kb))
 }

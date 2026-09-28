@@ -32,6 +32,10 @@ const cameraRingBytes = 8 << 20
 var cameraErrLagged = errors.New("摄像头消费者落后于实时流")
 
 // cameraOutputArgs 摄像头输出的编码与封装参数：完整转码 + 直播短 GOP。
+// 刻意不用 -tune zerolatency：它禁用 lookahead 让 x264 逐帧即时输出，
+// IDR 突发会直落电视端，实测部分电视解码器在每个 IDR 处都会顿挫
+// （表现为约每 2 秒一次卡顿）。默认 lookahead（约 40 帧）会把输出平滑掉，
+// 代价是约 +1 秒延迟——对「电视上监看摄像头」场景，平滑远比低延迟重要。
 // 刻意不用 -muxrate（CBR 恒定码率填充）：CBR 是 UDP 组播/IPTV 的做法，
 // 对 HTTP 单播拉流会用无意义的 null 包把码率硬填到设定值（约为真实数据
 // 的 5 倍），电视端播放缓冲被填充垃圾迅速塞满后判停断开——实测表现为
@@ -40,7 +44,7 @@ var cameraErrLagged = errors.New("摄像头消费者落后于实时流")
 // 结尾）之前给出。
 func cameraOutputArgs(plan Plan) []string {
 	args := codecArgs(plan, 0)
-	args = append(args, "-g", "60", "-keyint_min", "60", "-tune", "zerolatency")
+	args = append(args, "-g", "60", "-keyint_min", "60")
 	return append(args, containerArgs(plan.Container)...)
 }
 
