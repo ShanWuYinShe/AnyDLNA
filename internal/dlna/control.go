@@ -67,6 +67,15 @@ func (r *Renderer) Seek(ctx context.Context, unit, target string) error {
 	})
 }
 
+// TransportState 的标准取值（UPnP AVTransport），供调用方比较用，
+// 避免在各处硬编码字符串。未列出的取值（TRANSITIONING、NO_MEDIA_PRESENT
+// 等）按原样透传。
+const (
+	TransportStateStopped = "STOPPED"
+	TransportStatePlaying = "PLAYING"
+	TransportStatePaused  = "PAUSED_PLAYBACK"
+)
+
 // TransportState 返回播放状态（STOPPED / PLAYING / PAUSED_PLAYBACK 等）。
 func (r *Renderer) TransportState(ctx context.Context) (string, error) {
 	svc := r.dev.Service(AVTransportServiceType)
