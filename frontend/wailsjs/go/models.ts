@@ -191,6 +191,7 @@ export namespace media {
 	    kind: string;
 	    index: string;
 	    name: string;
+	    screen?: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new CameraDevice(source);
@@ -201,6 +202,7 @@ export namespace media {
 	        this.kind = source["kind"];
 	        this.index = source["index"];
 	        this.name = source["name"];
+	        this.screen = source["screen"];
 	    }
 	}
 	export class Config {

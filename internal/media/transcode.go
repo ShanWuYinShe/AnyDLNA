@@ -95,8 +95,8 @@ func NewTranscoder(path string, plan Plan) *Transcoder {
 // NewCameraTranscoder 创建摄像头实时采集会话：avfoundation 采集原始帧，
 // 实时转码为 H.264/AAC（原始帧没有已编码轨道，plan 的 copy 项被忽略，
 // 容器按设备能力在 TS / 碎片化 MP4 间选择，见 PlanForCamera）。
-func NewCameraTranscoder(video, audio string, plan Plan) *Transcoder {
-	return &Transcoder{camera: &CameraSource{VideoDevice: video, AudioDevice: audio}, plan: plan.orTranscode()}
+func NewCameraTranscoder(src *CameraSource, plan Plan) *Transcoder {
+	return &Transcoder{camera: src, plan: plan.orTranscode()}
 }
 
 // NewURLTranscoder 创建针对在线视频源的转码器。

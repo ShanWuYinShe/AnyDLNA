@@ -9,6 +9,7 @@ const state = {
     scrubbing: false,    // 用户正在拖动进度条
     stoppedCount: 0,     // 连续 STOPPED 次数，用于判定投屏结束
     config: null,        // 当前设置（代理与 Cookies）
+    captureDevs: [],     // 最近一次检测到的摄像头/麦克风/屏幕设备
 };
 
 function toast(msg, ms = 3600) {
@@ -609,42 +610,49 @@ function fillSourceSelect(sel, items, emptyLabel) {
     });
 }
 
-// listCameras 检测本机摄像头与麦克风；首次调用会触发系统权限弹窗。
+// listCameras 检测本机摄像头、麦克风与屏幕；首次调用会触发系统权限弹窗。
+// 屏幕捕获设备（screen 标记）与摄像头同列表展示，名称加「（屏幕）」后缀。
 async function listCameras() {
     const btn = $('btnListCameras');
     btn.disabled = true;
     btn.textContent = '检测中…';
     try {
         const devs = await call('ListCameras');
-        const cams = devs.filter((d) => d.kind === 'video');
+        state.captureDevs = devs;
+        const cams = devs.filter((d) => d.kind === 'video').map((d) => (
+            d.screen ? { ...d, name: d.name + '（屏幕）' } : d
+        ));
         const mics = devs.filter((d) => d.kind === 'audio');
-        fillSourceSelect($('cameraSelect'), cams, '未检测到摄像头');
+        fillSourceSelect($('cameraSelect'), cams, '未检测到采集设备');
         fillSourceSelect($('micSelect'), mics, '不使用麦克风');
         $('btnCastCamera').disabled = cams.length === 0;
-        if (!cams.length) toast('未检测到摄像头：请确认已连接并在系统权限中允许');
+        if (!cams.length) toast('未检测到摄像头或屏幕：请确认已连接并在系统权限中允许');
     } catch { /* toast 已提示 */ }
     finally {
         btn.disabled = false;
-        btn.textContent = '检测摄像头';
+        btn.textContent = '检测采集设备';
     }
 }
 
-// castCamera 把选中的摄像头（可选麦克风）实时投到当前设备。
+// castCamera 把选中的摄像头或屏幕（可选麦克风）实时投到当前设备。
 async function castCamera() {
     if (!state.selectedUDN) { toast('请先选择一台播放设备'); return; }
     const video = $('cameraSelect').value;
-    if (!video) { toast('请先点「检测摄像头」并选择摄像头'); return; }
+    if (!video) { toast('请先点「检测采集设备」并选择摄像头或屏幕'); return; }
+    const dev = (state.captureDevs || []).find((d) => d.index === video);
+    const isScreen = !!(dev && dev.screen);
     const btn = $('btnCastCamera');
     btn.disabled = true;
     btn.textContent = '正在投屏…';
     try {
-        const st = await call('CastCamera', state.selectedUDN, video, $('micSelect').value || '', '');
+        const st = await call('CastCamera', state.selectedUDN, video, $('micSelect').value || '', isScreen, '');
         startControls(st);
-        toast('摄像头已投屏；实时采集不支持进度拖动');
+        toast((isScreen ? '屏幕' : '摄像头') + '已投屏；实时采集不支持进度拖动');
+        if (isScreen) toast('受版权保护的内容会录出黑屏');
     } catch { /* toast 已提示 */ }
     finally {
         btn.disabled = false;
-        btn.textContent = '摄像头投屏';
+        btn.textContent = '摄像头/屏幕投屏';
     }
 }
 

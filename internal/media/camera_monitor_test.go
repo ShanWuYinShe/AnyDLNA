@@ -33,7 +33,7 @@ func TestCameraStreamMonitor(t *testing.T) {
 		t.Skip("未检测到摄像头设备")
 	}
 
-	tc := NewCameraTranscoder(video, "", Plan{Mode: OutputTranscode, Container: ContainerMPEGTS})
+	tc := NewCameraTranscoder(&CameraSource{VideoDevice: video}, Plan{Mode: OutputTranscode, Container: ContainerMPEGTS})
 	pr, pw := io.Pipe()
 	cancel, done, err := tc.StreamTo(pw)
 	if err != nil {

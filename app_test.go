@@ -118,7 +118,7 @@ func TestCameraCastSmoothness(t *testing.T) {
 		t.Skip("未检测到摄像头设备")
 	}
 
-	if _, err := app.CastCamera(dev.UDN, videoIdx, "", ""); err != nil {
+	if _, err := app.CastCamera(dev.UDN, videoIdx, "", false, ""); err != nil {
 		t.Fatalf("投屏失败: %v", err)
 	}
 
@@ -632,7 +632,7 @@ func TestCameraCastStopRecastWithFakeTV(t *testing.T) {
 
 	castAndFlow := func(round string) {
 		t.Helper()
-		st, err := app.CastCamera(dev.UDN, videoIdx, "", "")
+		st, err := app.CastCamera(dev.UDN, videoIdx, "", false, "")
 		if err != nil {
 			t.Fatalf("%s: 投屏失败: %v", round, err)
 		}

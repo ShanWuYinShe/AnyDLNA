@@ -27,7 +27,8 @@ func TestParseAVFoundationDevices(t *testing.T) {
 	}
 	want := []string{
 		"video:0:FaceTime HD Camera",
-		// 屏幕捕获设备不属于摄像头，应被过滤。
+		// 屏幕捕获设备保留在列表中，以 Screen 标记区分（见 cameraInputArgs）。
+		"video:1:Capture screen 0",
 		"video:2:iPhone 摄像头",
 		"audio:0:MacBook Pro Microphone",
 		"audio:2:iPhone 麦克风",
@@ -40,6 +41,46 @@ func TestParseAVFoundationDevices(t *testing.T) {
 			t.Errorf("第 %d 项不一致: got %q want %q", i, names[i], want[i])
 		}
 	}
+	// 只有屏幕设备带 Screen 标记；摄像头与音频设备不得误标。
+	for i, d := range devs {
+		if got := d.Screen; got != (d.Name == "Capture screen 0") {
+			t.Errorf("第 %d 项 Screen 标记错误: %+v", i, d)
+		}
+	}
+}
+
+// TestCameraInputArgs 摄像头与屏幕的采集参数分支：
+// 摄像头强制 720p；屏幕按原生分辨率采集、降采样到 720p 并保证偶数尺寸。
+func TestCameraInputArgs(t *testing.T) {
+	cam := cameraInputArgs(&CameraSource{VideoDevice: "0"})
+	if !containsAll(cam, []string{"-video_size", "1280x720"}) || containsAll(cam, []string{"-vf"}) {
+		t.Errorf("摄像头采集参数异常: %v", cam)
+	}
+	scr := cameraInputArgs(&CameraSource{VideoDevice: "1", Screen: true})
+	if containsAll(scr, []string{"-video_size"}) {
+		t.Errorf("屏幕采集不应强制 video_size: %v", scr)
+	}
+	if !containsAll(scr, []string{"-capture_cursor", "1", "-vf",
+		"scale=w=1280:h=720:force_original_aspect_ratio=decrease:force_divisible_by=2"}) {
+		t.Errorf("屏幕采集参数异常: %v", scr)
+	}
+}
+
+// containsAll 判断 args 是否包含全部给定元素（按独立元素比较）。
+func containsAll(args, want []string) bool {
+	for _, w := range want {
+		found := false
+		for _, a := range args {
+			if a == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // TestParseAVFoundationDevicesEmpty 无 avfoundation 输出（如 ffmpeg 缺失

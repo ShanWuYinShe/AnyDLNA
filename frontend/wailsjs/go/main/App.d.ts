@@ -7,7 +7,7 @@ export function AddDeviceManually(arg1:string):Promise<main.DeviceInfo>;
 
 export function Cast(arg1:string,arg2:string,arg3:string):Promise<main.CastStatus>;
 
-export function CastCamera(arg1:string,arg2:string,arg3:string,arg4:string):Promise<main.CastStatus>;
+export function CastCamera(arg1:string,arg2:string,arg3:string,arg4:boolean,arg5:string):Promise<main.CastStatus>;
 
 export function CastURL(arg1:string,arg2:string,arg3:string):Promise<main.CastStatus>;
 
