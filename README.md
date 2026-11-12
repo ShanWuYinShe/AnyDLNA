@@ -194,10 +194,14 @@ frontend/src/            # 原生 HTML/JS/CSS 界面（投屏主页 + 设置页�
 
 ## 测试
 
+完整套件（vet + 全量 go test，含竞态检测）由 CI 门禁执行；本地提交前只跑
+`gofmt` / `go vet` / `go build` 秒级检查（见 AGENTS.md「CI 门禁与本地验证分工」）。
+以下命令用于本地复现 CI 失败或调试单个用例，不是提交前门禁：
+
 ```bash
-# 日常入口：vet + 全量 go test（默认套件无需外部工具，集成用例自动 skip）：
+# 本地复现完整套件（仅排查 CI 失败时需要；默认套件无需外部工具，集成用例自动 skip）：
 ./scripts/test.sh
-# 同上并启用竞态检测（推荐在改并发相关代码后执行）：
+# 同上并启用竞态检测：
 RACE=1 ./scripts/test.sh
 # 等价的基础命令：
 go vet ./...
