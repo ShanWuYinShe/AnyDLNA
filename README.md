@@ -114,11 +114,8 @@ YouTube 等站点常要求人机验证（"Sign in to confirm you're not a bot"�
 | **用应用登录浏览器** | 打开一个**独立 profile** 的浏览器窗口供你登录，再把登录状态交给应用；可在下拉中指定用哪台已检测到的浏览器（默认取第一个候选）。适合日常浏览器不是 Chromium 系、或希望把登录态与应用隔离的场景。 |
 | **不使用 Cookies** | 仅访问无需登录的公开内容。 |
 
-关于两种登录方式的取舍，有几点基于实测的说明：
-
-- **「读取本机浏览器」不做数据复制**，由 yt-dlp 直接读取浏览器自身的 Cookie 存储并解密，因此始终与你浏览器里的登录状态一致。首次在 macOS 上读取 Chrome 时系统会弹出钥匙串授权，请点「允许」。
-- **「用应用登录浏览器」必须使用独立 profile（技术限制，非实现选择）**：Chrome 136 起，`--remote-debugging-port` 在默认数据目录下会被忽略，官方推荐自动化场景使用独立数据目录（见 [Chrome 官方说明](https://developer.chrome.com/blog/remote-debugging-port)）；此外同一 profile 不能被两个进程同时打开，共享 profile 将要求你先完全退出日常浏览器。因此这里刻意不共用日常 profile。
-- **复制日常 profile 的做法不可行**：Chrome 的 App-Bound Encryption 把 Cookie 密钥绑定在原 profile 上，复制到别处后登录态无法解密（实测复制后仅能读到匿名 Cookie）。这也是「读取本机浏览器」由 yt-dlp 原地读取、而非应用先复制的原因。
+两种登录方式的取舍基于实测（Chrome 136 调试端口限制、profile 复制不可行等），
+技术背景见 [DESIGN.md](DESIGN.md)；使用上按设置页的模式说明选择即可。
 
 ## 播放性能
 
@@ -183,14 +180,7 @@ frontend/src/            # 原生 HTML/JS/CSS 界面（投屏主页 + 设置页�
 
 ### 并发约定
 
-`app.go` 中的两把锁职责严格区分，修改时务必遵守：
-
-- `a.mu` 只保护内存状态，**临界区内绝不做网络、进程或等待用户的操作**；
-- `app.castMu` 串行化投屏相关操作，耗时的 I/O（设备能力查询、yt-dlp 解析、设备 SOAP 调用、转码进程回收）在持有 `castMu`、但不持有 `a.mu` 的情况下执行。
-
-违反该约定会导致 `a.mu` 被长时间占用，进而让**所有前端 IPC 挂起**（表现为「点了投屏没反应」），`app_test.go` 中的回归测试会捕获这类问题。
-
-诊断日志请用 `a.logf`（标准库）而非 `runtime.Log*`：Wails 的 runtime 日志在上下文不是生命周期上下文时会 `log.Fatalf` 直接终止进程，诊断信息不该有这种后果。
+`app.go` 两把锁（`a.mu` / `castMu`）的职责边界与日志约定见 [AGENTS.md](AGENTS.md)「并发约定」一节。
 
 ## 测试
 

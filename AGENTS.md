@@ -12,6 +12,18 @@ Go + Wails v2 桌面应用：把在线视频（yt-dlp 解析 YouTube/B 站等）
 - `cmd/faketv` 是模拟 DLNA 电视，供 `internal/media` 的 faketv E2E 与手动试用；`negotiation_itest_test.go` 用的是真实设备（`ANYDLNA_TV_HOST`）。
 - 功能说明与依赖查找链详见 README.md。
 
+## 并发约定（app.go）
+
+`app.go` 中的两把锁职责严格区分，修改时务必遵守：
+
+- `a.mu` 只保护内存状态，**临界区内绝不做网络、进程或等待用户的操作**；
+- `app.castMu` 串行化投屏相关操作，耗时的 I/O（设备能力查询、yt-dlp 解析、设备 SOAP 调用、转码进程回收）在持有 `castMu`、但不持有 `a.mu` 的情况下执行。
+
+违反该约定会导致 `a.mu` 被长时间占用，进而让**所有前端 IPC 挂起**（表现为「点了投屏没反应」），`app_test.go` 中的回归测试会捕获这类问题。
+
+诊断日志请用 `a.logf`（标准库）而非 `runtime.Log*`：Wails 的 runtime 日志在上下文不是生命周期上下文时会 `log.Fatalf` 直接终止进程，诊断信息不该有这种后果。
+
+
 ## CI 门禁与本地验证分工
 
 重活（全量测试、构建、打包、E2E、镜像构建）一律交给 GitHub Actions，本地只跑秒级检查。
