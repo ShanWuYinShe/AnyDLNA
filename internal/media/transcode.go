@@ -52,12 +52,15 @@ func NeedsPipeMode(extractor string) bool {
 
 // plan 决定输出方式：可直通的轨道用 -c copy 复制，避免不必要的重编码。
 type Transcoder struct {
-	mu        sync.Mutex
-	path      string        // 本地文件路径；为空表示在线源
-	srcURL    string        // 在线视频页面/流地址（直链模式只用于解析，管道模式用于下载）
-	isLive    bool          // 直播流（不支持跳转）
-	opts      Options       // 在线源的代理与 Cookies 配置
-	plan      Plan          // 输出方式（换封装 / 转码）
+	mu     sync.Mutex
+	path   string  // 本地文件路径；为空表示在线源
+	srcURL string  // 在线视频页面/流地址（直链模式只用于解析，管道模式用于下载）
+	isLive bool    // 直播流（不支持跳转）
+	opts   Options // 在线源的代理与 Cookies 配置
+	plan   Plan    // 输出方式（换封装 / 转码）
+	// caps 是目标设备声明的能力，用于换候选后重算 plan（见 effectivePlanLocked）。
+	// 零值表示未查询到，重算时按保守策略处理。
+	caps      DeviceCapabilities
 	offset    int64         // 转码起始位置（毫秒），供下一次启动使用
 	pipe      bool          // 管道模式：yt-dlp 下载经管道喂 ffmpeg；否则 Go 传输模式
 	camera    *CameraSource // 非空表示摄像头实时采集源（macOS avfoundation）
@@ -74,7 +77,10 @@ type Transcoder struct {
 	// cachedHeaders 与 cachedURLs 一一对应，是每条直链必需的 HTTP 请求头
 	// （如 B 站 CDN 校验的 Referer），由 NewUpstreamWithHeaders 回放。
 	cachedHeaders []map[string]string
-	cachedAt      time.Time
+	// cachedStreamInfo 与 cachedURLs 一一对应，记录每条直链的编码与分辨率，
+	// 供换候选后重算输出方案（见 effectivePlanLocked）。
+	cachedStreamInfo []streamInfo
+	cachedAt         time.Time
 
 	// resolveURLs 可注入的直链刷新函数（单测用）；nil 时走默认 DirectURLs。
 	resolveURLs func(ctx context.Context) ([]string, error)
@@ -350,7 +356,10 @@ func (t *Transcoder) StreamTo(w io.Writer) (cancel func(), done <-chan struct{},
 			}
 			args = append(args, "-i", u)
 		}
-		cmd := toolCmd("ffmpeg", append(args, outputArgs(t.plan, audioIdx)...)...)
+		// 用**实际在用**的流重算输出方案：候选可能因节点不可达而换成
+		// 别的分辨率/编码，沿用投屏时的 plan 会导致直通设备解不了的编码。
+		plan := t.effectivePlanLocked()
+		cmd := toolCmd("ffmpeg", append(args, outputArgs(plan, audioIdx)...)...)
 		setProcGroup(cmd)
 		return t.launchLocked(cmd, nil, nil, w, stderr)
 	}
@@ -402,7 +411,7 @@ func (t *Transcoder) directURLsAndHeadersLocked(ctx context.Context) ([]string, 
 	if len(t.cachedURLs) > 0 && time.Since(t.cachedAt) < directCacheTTL {
 		return t.cachedURLs, t.cachedHeaders, nil
 	}
-	urls, headers, variants, err := t.refreshURLsWithHeaders(ctx)
+	urls, headers, variants, infos, err := t.refreshURLsWithHeaders(ctx)
 	if err != nil {
 		// 缓存过期但重取失败时，若有旧链（刚过期）仍可一试；
 		// 直链 expire 通常数小时，刚过 TTL 大概率仍有效。
@@ -414,24 +423,25 @@ func (t *Transcoder) directURLsAndHeadersLocked(ctx context.Context) ([]string, 
 	t.cachedURLs = urls
 	t.cachedHeaders = headers
 	t.cachedVariants = variants
+	t.cachedStreamInfo = infos
 	t.cachedAt = time.Now()
 	return urls, headers, nil
 }
 
 // refreshURLs 刷新直链：默认调 DirectURLs。
 func (t *Transcoder) refreshURLs(ctx context.Context) ([]string, error) {
-	urls, _, _, err := t.refreshURLsWithHeaders(ctx)
+	urls, _, _, _, err := t.refreshURLsWithHeaders(ctx)
 	return urls, err
 }
 
-// refreshURLsWithHeaders 刷新直链、必需的请求头与编码变体候选。
-func (t *Transcoder) refreshURLsWithHeaders(ctx context.Context) ([]string, []map[string]string, [][]resolvedVariant, error) {
+// refreshURLsWithHeaders 刷新直链、必需的请求头、候选与编码信息。
+func (t *Transcoder) refreshURLsWithHeaders(ctx context.Context) ([]string, []map[string]string, [][]resolvedVariant, []streamInfo, error) {
 	if t.resolveURLs != nil {
 		urls, err := t.resolveURLs(ctx)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
-		return urls, nil, nil, nil
+		return urls, nil, nil, nil, nil
 	}
 	return resolveURLsWithVariants(ctx, t.srcURL, t.opts)
 }
@@ -517,6 +527,12 @@ func (t *Transcoder) buildDirectLocked(urls []string, headers []map[string]strin
 				vs = t.cachedVariants[i]
 			}
 			up, uerr := newUpstreamWithVariants(u, h, vs, t.opts)
+			// 记录主链编码：候选可能换成别的分辨率/编码，之后要靠这里
+			// 判断「实际在用的流」是否需要重算输出方案。
+			if uerr == nil && up != nil && i < len(t.cachedStreamInfo) {
+				si := t.cachedStreamInfo[i]
+				up.SetStreamInfo(si.videoCodec, si.audioCodec, si.height)
+			}
 			ups[i], uerrs[i] = up, uerr
 		}()
 	}
@@ -571,38 +587,102 @@ func (t *Transcoder) buildDirectLocked(urls []string, headers []map[string]strin
 	return t.directInputsLocked(), len(urls) - 1, false, nil
 }
 
-// newUpstreamWithVariants 先试主链，失败则依次尝试同分辨率的其它编码变体。
+// newUpstreamWithVariants 在所有候选里挑一个真正可用的上游。
 //
-// B 站把同一分辨率的各编码（avc1/hev1/av01）放在不同 CDN 节点上，部分节点
-// 在特定网络下完全不可达（实测 TLS 握手超时），且重新解析仍返回同一节点。
-// 换编码变体是唯一能绕开坏节点的路径；编解码差异交由 plan 决定是否转码。
+// 策略：主链与候选**并发探测**，取第一个成功者；失败的继续在后台探测，
+// 一旦发现更优（更靠前）的候选可用就记录日志便于排查。
+//
+// 为什么并发而不是串行：实测 B 站节点约有半数直接 Connection refused，
+// 串行探测每个失败要等满超时（每个 15 秒级别），用户投屏前要干等几十秒。
+// 并发探测把「等待所有失败」变成「等第一个成功」，起播时间从数十秒降到
+// 数秒。实测连续 6 次解析全落同一坏节点，串行重试完全无法自救。
 func newUpstreamWithVariants(primary string, headers map[string]string, variants []resolvedVariant, opts Options) (*Upstream, error) {
-	up, err := NewUpstreamWithHeaders(primary, opts, headers)
-	if err == nil {
+	type candidate struct {
+		url     string
+		headers map[string]string
+		label   string
+	}
+	cands := []candidate{{url: primary, headers: headers, label: "主链"}}
+	for _, v := range variants {
+		cands = append(cands, candidate{url: v.URL, headers: v.Headers, label: v.Codec})
+	}
+	if len(cands) == 1 {
+		up, err := NewUpstreamWithHeaders(primary, opts, headers)
+		if err != nil {
+			return nil, err
+		}
 		// 探测通过不代表分片拉得到：B 站 PCDN 节点常在探测后立刻 EOF。
-		// 把变体挂上，供 fetchChunk 在断流时切换续拉。
-		up.variants = variants
+		// 变体为空，断流时只能靠重试。
 		return up, nil
 	}
-	lastErr := err
-	Diagf("主链不可达 host=%s，尝试同分辨率其它编码变体（%d 个）", shortHost(primary), len(variants))
-	for i, v := range variants {
-		up, verr := NewUpstreamWithHeaders(v.URL, opts, v.Headers)
-		if verr == nil {
-			Diagf("已换用编码变体 %s host=%s", v.Codec, shortHost(v.URL))
-			// 剩下的变体继续作为后续备份。
-			up.variants = variants[:0:0]
-			if i+1 < len(variants) {
-				up.variants = append(up.variants, variants[i+1:]...)
+
+	// 缓冲区足够大，保证所有 goroutine 都能写入而不泄漏。
+	ch := make(chan probeResult, len(cands))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	for i, c := range cands {
+		go func(i int, c candidate) {
+			up, err := NewUpstreamWithHeaders(c.url, opts, c.headers)
+			ch <- probeResult{idx: i, up: up, err: err}
+		}(i, c)
+	}
+
+	var firstErr error
+	for done := 0; done < len(cands); done++ {
+		select {
+		case <-ctx.Done():
+			// 已经拿到可用上游，回收剩余结果里的成功者即可。
+			continue
+		case r := <-ch:
+			if r.err != nil {
+				if firstErr == nil {
+					firstErr = r.err
+				}
+				continue
 			}
-			return up, nil
+			if r.idx > 0 {
+				Diagf("已换用候选节点 %s host=%s（共 %d 个候选）",
+					cands[r.idx].label, shortHost(cands[r.idx].url), len(cands))
+			}
+			// 其余候选挂为备用：播放中途断流时切换续拉。
+			for j := r.idx + 1; j < len(cands); j++ {
+				r.up.variants = append(r.up.variants, resolvedVariant{
+					URL: cands[j].url, Headers: cands[j].headers,
+				})
+			}
+			// 已经拿到能用的，立即返回；后台探测结果由 defer cancel 收尾。
+			go drainResults(ch, done+1, len(cands))
+			return r.up, nil
 		}
-		lastErr = verr
 	}
-	if len(variants) > 0 {
-		return nil, fmt.Errorf("主链与 %d 个编码变体均不可达: %w", len(variants), lastErr)
+	if firstErr != nil {
+		return nil, fmt.Errorf("全部 %d 个候选节点均不可达: %w", len(cands), firstErr)
 	}
-	return nil, lastErr
+	return nil, errors.New("没有可用的上游候选")
+}
+
+// streamInfo 是一路直链的编码与分辨率。
+type streamInfo struct {
+	videoCodec string
+	audioCodec string
+	height     int
+}
+
+// probeResult 是一次候选探测的结果。
+type probeResult struct {
+	idx int
+	up  *Upstream
+	err error
+}
+
+// drainResults 收尾后台探测：把迟到成功者的上游关闭，避免缓存文件泄漏。
+func drainResults(ch <-chan probeResult, done, total int) {
+	for ; done < total; done++ {
+		if r, ok := <-ch; ok && r.up != nil {
+			_ = r.up.Close()
+		}
+	}
 }
 
 // urlsKey 把一组直链压成可比较的标识，用于判断传输能否复用。
@@ -670,6 +750,28 @@ func (t *Transcoder) PrefetchDirect(ctx context.Context) error {
 			return lastErr
 		}
 	}
+}
+
+// effectivePlanLocked 返回本次实际应使用的输出方案。
+//
+// plan 是投屏时按「yt-dlp 选中的那一条」算出来的；但传输层可能因该节点
+// 不可达而换用其它候选（分辨率或编码不同），此时必须按**实际在用的流**
+// 重算，否则会把设备解不了的编码硬塞过去（黑屏/花屏），或对已能直通的
+// 流做多余转码（白耗 CPU、反而卡）。
+// 调用方须持有 t.mu。
+func (t *Transcoder) effectivePlanLocked() Plan {
+	if t.srcURL == "" || len(t.directUps) == 0 {
+		return t.plan // 本地文件/摄像头/管道模式：plan 与候选无关
+	}
+	vcodec, acodec, _ := t.directUps[0].CurrentStream()
+	if vcodec == "" {
+		return t.plan
+	}
+	actual := PlanForOnline(vcodec, acodec, t.caps)
+	if actual.Mode != t.plan.Mode || actual.CopyVideo != t.plan.CopyVideo || actual.CopyAudio != t.plan.CopyAudio {
+		Diagf("按实际流重算输出方案: %s→%s 编码=%s/%s", t.plan.Mode, actual.Mode, vcodec, acodec)
+	}
+	return actual
 }
 
 // outputArgs 构造输出直播流的 ffmpeg 参数。

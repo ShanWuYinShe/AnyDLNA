@@ -24,7 +24,7 @@ func TestBilibiliChain(t *testing.T) {
 		t.Skip("未设置 ANYDLNA_BILI_PAGE，跳过真实站点验证")
 	}
 	opts := Options{ProxyMode: ProxyModeSystem}
-	urls, headers, variants, err := resolveURLsWithVariants(context.Background(), page, opts)
+	urls, headers, variants, _, err := resolveURLsWithVariants(context.Background(), page, opts)
 	if err != nil {
 		t.Fatalf("解析失败: %v", err)
 	}
