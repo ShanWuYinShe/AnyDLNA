@@ -105,7 +105,13 @@ func (s *StreamServer) AddCamera(videoDevice, audioDevice string, screen bool, t
 // urls 是 ResolveDirect 附带返回的直链，为空则预热时回退到 DirectURLs 再取。
 // opts 决定代理与 Cookies 行为，语义见 ytDlpCommonArgs。
 func (s *StreamServer) AddTranscodeURL(ctx context.Context, url, title string, isLive bool, opts Options, plan Plan, extractor string, urls []string) (string, error) {
-	tc := NewURLTranscoder(url, isLive, opts, plan, extractor, urls)
+	return s.AddTranscodeURLWithHeaders(ctx, url, title, isLive, opts, plan, extractor, urls, nil)
+}
+
+// AddTranscodeURLWithHeaders 同 AddTranscodeURL，额外接收每条直链必需的
+// HTTP 请求头（与 urls 一一对应）。
+func (s *StreamServer) AddTranscodeURLWithHeaders(ctx context.Context, url, title string, isLive bool, opts Options, plan Plan, extractor string, urls []string, headers []map[string]string) (string, error) {
+	tc := NewURLTranscoderWithHeaders(url, isLive, opts, plan, extractor, urls, headers)
 	if err := tc.PrefetchDirect(ctx); err != nil {
 		return "", err
 	}
@@ -178,6 +184,8 @@ func (s *StreamServer) serveTranscode(w http.ResponseWriter, r *http.Request) {
 	}
 	// 连接生命周期诊断：电视端周期性断开重连（DLNA 直播流常态）时，
 	// 这两条日志能直接呈现连接模式——多久断一次、每次收了多少字节。
+	// 平均速率与首字节耗时是判断「电视端卡顿」的第一手依据：
+	// 平均速率应始终高于源码率，否则电视必然反复缓冲。
 	connStart := time.Now()
 	var connBytes int64
 	log.Printf("拉流开始 %s（会话 %s）", r.URL.Path, sess.id)
@@ -202,17 +210,31 @@ func (s *StreamServer) serveTranscode(w http.ResponseWriter, r *http.Request) {
 	select {
 	case <-r.Context().Done():
 		connBytes = counting.bytes()
-		log.Printf("拉流结束 %s（会话 %s）：电视端断开，时长 %s，送达 %d 字节",
-			r.URL.Path, sess.id, time.Since(connStart).Round(time.Millisecond), connBytes)
+		log.Printf("拉流结束 %s（会话 %s）：电视端断开，时长 %s，送达 %d 字节%s",
+			r.URL.Path, sess.id, time.Since(connStart).Round(time.Millisecond), connBytes, rateSummary(connBytes, connStart))
 	case <-done:
 		connBytes = counting.bytes()
-		log.Printf("拉流结束 %s（会话 %s）：服务端流结束，时长 %s，送达 %d 字节",
-			r.URL.Path, sess.id, time.Since(connStart).Round(time.Millisecond), connBytes)
+		log.Printf("拉流结束 %s（会话 %s）：服务端流结束，时长 %s，送达 %d 字节%s",
+			r.URL.Path, sess.id, time.Since(connStart).Round(time.Millisecond), connBytes, rateSummary(connBytes, connStart))
 	}
 	cancel()
 	if msg := sess.tc.LastStderr(); msg != "" {
 		log.Printf("转码进程输出: %s", msg)
 	}
+}
+
+// rateSummary 返回「平均速率 + 首字节耗时」的诊断后缀，用于投屏日志。
+// 送达 0 字节时明确标注，这是「电视端等不到数据就断开」的典型形态。
+func rateSummary(n int64, start time.Time) string {
+	d := time.Since(start)
+	if n == 0 {
+		return fmt.Sprintf("，平均 0 B/s（%s 内未送达任何数据）", d.Round(time.Millisecond))
+	}
+	sec := d.Seconds()
+	if sec <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("，平均 %.2f MB/s", float64(n)/sec/1048576)
 }
 
 // countingFlushWriter 在 flushWriter 基础上统计送达字节数（连接诊断用）。

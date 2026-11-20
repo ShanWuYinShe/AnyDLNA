@@ -2,6 +2,7 @@ package media
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -47,9 +48,76 @@ const (
 	upstreamTempPrefix = "anydlna-upstream-"
 )
 
-// upstreamUA 是向上游请求时带的 UA。googlevideo 不校验 UA；B 站等站点走
-// 管道模式不经过这里，填浏览器 UA 只是为了不在 CDN 日志里显得异常。
+// upstreamUA 是向上游请求时的默认 UA：直链没带自己的 UA 时用它。
+// 只填浏览器 UA 不够——B 站等站点的 CDN 还校验 Referer，缺失时直接 403，
+// 所以请求头必须以直链自带的 http_headers 为准（见 normalizeUpstreamHeaders）。
 const upstreamUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+
+// normalizeUpstreamHeaders 只保留回放媒体分片真正必需的头。
+//
+// 白名单而非黑名单：yt-dlp 的 http_headers 里混着「页面导航」语义的头
+// （Accept: text/html、Sec-Fetch-Mode: navigate 等），那是它抓页面时留下的。
+// 拿这些头去请求媒体分片，语义上就不是「播放器在取流」，CDN 可能据此
+// 降级或限速；而真正被校验的只有 Referer（B 站缺它直接 403）与 UA。
+// 因此这里只放行这两类，其余一律不发送。
+func normalizeUpstreamHeaders(headers map[string]string) map[string]string {
+	if len(headers) == 0 {
+		return nil
+	}
+	out := make(map[string]string, 2)
+	for k, v := range headers {
+		if v == "" {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(k)) {
+		case "user-agent", "referer", "origin":
+			out[k] = v
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// currentSource 返回当前应请求的地址与请求头。
+func (up *Upstream) currentSource() (string, map[string]string) {
+	up.mu.Lock()
+	idx := up.variantIdx
+	var variant resolvedVariant
+	if idx > 0 && idx-1 < len(up.variants) {
+		variant = up.variants[idx-1]
+	}
+	up.mu.Unlock()
+	if variant.URL == "" {
+		return up.url, up.headers
+	}
+	return variant.URL, variant.Headers
+}
+
+// advanceVariant 切到下一个编码变体；全部用尽时返回 false。
+func (up *Upstream) advanceVariant() bool {
+	up.mu.Lock()
+	if up.variantIdx >= len(up.variants) {
+		up.mu.Unlock()
+		return false
+	}
+	up.variantIdx++
+	v := up.variants[up.variantIdx-1]
+	up.mu.Unlock()
+	Diagf("当前节点断流，切换编码变体 %s host=%s", v.Codec, shortHost(v.URL))
+	return true
+}
+
+// applyHeaders 把直链请求头写进 req；UA 缺失时补默认值。
+func (up *Upstream) applyHeaders(req *http.Request) {
+	for k, v := range up.headers {
+		req.Header.Set(k, v)
+	}
+	if req.Header.Get("User-Agent") == "" {
+		req.Header.Set("User-Agent", upstreamUA)
+	}
+}
 
 // newProxyHTTPClient 按设置里的代理构造上游请求客户端。
 // http(s) 代理走 Transport.Proxy；socks5 走 x/net/proxy 的 DialContext；
@@ -116,6 +184,16 @@ func socksDialContext(dialer proxy.Dialer) func(ctx context.Context, network, ad
 type Upstream struct {
 	url    string
 	client *http.Client
+	// headers 是该直链必需的 HTTP 请求头（来自 yt-dlp 的 http_headers），
+	// 与 upstreamUA 合并后随每个请求发出。B 站 CDN 校验 Referer，
+	// 缺失时直接 403，表现为投屏必然失败。
+	headers map[string]string
+	// variants 是同分辨率下的其它编码变体：当前节点连续拉取失败
+	// （EOF/超时）时切换过去续拉。B 站把不同编码放在不同 CDN 节点上，
+	// 部分节点会在播放中途断流，换变体是唯一能继续播放的路径。
+	variants []resolvedVariant
+	// variantIdx 是当前使用的变体序号（0 = 主链）。
+	variantIdx int
 
 	mu     sync.Mutex
 	cond   *sync.Cond
@@ -136,12 +214,27 @@ type Upstream struct {
 // NewUpstream 探测上游（长度与 Range 支持）并建好缓存。探测失败直接返回错误，
 // 由调用方在投屏点击时展示，而不是等电视拉流时才转圈。
 func NewUpstream(rawURL string, opts Options) (*Upstream, error) {
+	return NewUpstreamWithHeaders(rawURL, opts, nil)
+}
+
+// NewUpstreamWithHeaders 同 NewUpstream，额外带上该直链必需的 HTTP 请求头
+// （由 yt-dlp 的 http_headers 提供，例如 B 站 CDN 校验的 Referer）。
+func NewUpstreamWithHeaders(rawURL string, opts Options, headers map[string]string) (*Upstream, error) {
+	up, err := newUpstreamOnce(rawURL, opts, headers)
+	if err != nil {
+		return nil, err
+	}
+	return up, nil
+}
+
+// newUpstreamOnce 建立单路上游：探测 → 建缓存。探测含三次小退避重试。
+func newUpstreamOnce(rawURL string, opts Options, headers map[string]string) (*Upstream, error) {
 	client, err := newProxyHTTPClient(opts)
 	if err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	up := &Upstream{url: rawURL, client: client, ctx: ctx, cancel: cancel}
+	up := &Upstream{url: rawURL, client: client, headers: normalizeUpstreamHeaders(headers), ctx: ctx, cancel: cancel}
 	up.cond = sync.NewCond(&up.mu)
 	// 探测重试：googlevideo 会瞬时拒绝（403/超时），同一直链小退避重试，
 	// 恢复通常只要 1-2 秒；比直接换新直链（重新走一次 yt-dlp，十几秒）便宜得多。
@@ -159,6 +252,13 @@ func NewUpstream(rawURL string, opts Options) (*Upstream, error) {
 			break
 		}
 		Diagf("上游探测第%d次失败 host=%s err=%v", attempt+1, shortHost(rawURL), serr)
+		// 连接级失败（拨号/TLS 超时）是节点本身不可达，重试同一个 host 只是
+		// 再等一遍超时：B 站会给出多个 CDN 节点，其中 PCDN 节点（如
+		// *.edge.mountaintoys.cn）在部分网络下完全不可达，实测三次探测白等
+		// 57 秒。这里立即失败，让调用方换一组新直链（通常解析到不同节点）。
+		if isConnError(serr) {
+			break
+		}
 	}
 	if serr != nil {
 		cancel()
@@ -202,7 +302,7 @@ func (up *Upstream) stat() error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("User-Agent", upstreamUA)
+	up.applyHeaders(req)
 	req.Header.Set("Range", "bytes=0-0")
 	resp, err := up.client.Do(req)
 	if err != nil {
@@ -225,6 +325,28 @@ func (up *Upstream) stat() error {
 	default:
 		return fmt.Errorf("上游 %s 返回 %s", shortHost(up.url), resp.Status)
 	}
+}
+
+// isConnError 报告错误是否为连接级失败（拨号/握手），而非上游明确的服务端响应。
+// 连接级失败意味着该节点在当前网络下不可达，换直链比原地重试有效。
+func isConnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	// url.Error 包裹拨号/握手失败；net/http 的 TLS 握手超时以字符串形式暴露。
+	msg := err.Error()
+	return strings.Contains(msg, "TLS handshake timeout") ||
+		strings.Contains(msg, "no such host") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "i/o timeout")
 }
 
 // shortHost 截取 URL 的 host 部分用于报错（完整直链上千字符，不能进日志）。
@@ -487,6 +609,9 @@ func (up *Upstream) fetchChunk(idx int64) {
 	}
 
 	var lastErr error
+	// 重试次数按节点数放大：主链失败后逐个试备用节点，每个节点都有独立的
+	// 重试机会。B 站 PCDN 节点常在播放中途开始返回 EOF，换到 mcdn/upos
+	// 节点即可续拉；不换节点的话整路会被标记失败，电视端表现为中途断流。
 	for attempt := 0; attempt < upstreamChunkRetries; attempt++ {
 		if up.ctx.Err() != nil {
 			return
@@ -499,14 +624,21 @@ func (up *Upstream) fetchChunk(idx int64) {
 			case <-time.After(time.Duration(attempt) * time.Second):
 			}
 		}
+		// 取当前生效的地址与请求头：变体切换后这里拿到的就是新节点。
+		reqURL, reqHeaders := up.currentSource()
 		ctx, cancel := context.WithTimeout(up.ctx, 30*time.Second)
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, up.url, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 		if err != nil {
 			cancel()
 			lastErr = err
 			continue
 		}
-		req.Header.Set("User-Agent", upstreamUA)
+		for k, v := range reqHeaders {
+			req.Header.Set(k, v)
+		}
+		if req.Header.Get("User-Agent") == "" {
+			req.Header.Set("User-Agent", upstreamUA)
+		}
 		if ranged {
 			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
 		}
@@ -540,8 +672,21 @@ func (up *Upstream) fetchChunk(idx int64) {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 		cancel()
+		// 读完但字节数不足分片长度：上游中途 EOF（PCDN 节点常见），
+		// 这一片不完整，必须重拉，否则缓存里留下空洞——电视端解码到
+		// 空洞处直接卡死或黑屏。
+		if err == nil && ranged && end >= 0 && n != end-start+1 {
+			err = fmt.Errorf("分片数据不完整：期望 %d 字节，实际 %d", end-start+1, n)
+		}
 		if err != nil {
 			lastErr = err
+			// 当前节点断流：换同分辨率的其它编码变体续拉；全部试过则
+			// 从头再来一轮，避免一个坏节点把整路标记为失败（电视端会断流）。
+			if !up.advanceVariant() {
+				up.mu.Lock()
+				up.variantIdx = 0
+				up.mu.Unlock()
+			}
 			continue
 		}
 		up.mu.Lock()
@@ -584,10 +729,10 @@ func (up *Upstream) writeAtFull(body io.Reader, start int64) (int64, error) {
 	for {
 		c, rerr := body.Read(buf)
 		if c > 0 {
-			up.mu.Lock()
-			_, werr := up.file.WriteAt(buf[:c], start+n)
-			up.mu.Unlock()
-			if werr != nil {
+			// 写盘不持锁：每个分片写自己的区间，区间互不重叠
+			// （分片由 pickChunkLocked 独占分配），因此无需串行化。
+			// 持锁写会让 4 路并发拉取退化成单路（实测吞吐掉一个数量级）。
+			if _, werr := up.file.WriteAt(buf[:c], start+n); werr != nil {
 				return n, werr
 			}
 			n += int64(c)
@@ -657,10 +802,13 @@ func (up *Upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		chunk := chunkPool.Get().([]byte)[:to-off+1]
 		up.mu.Lock()
 		err := up.ensureLocked(r.Context(), off, to+1)
+		up.mu.Unlock()
+		// 磁盘读取必须在锁外：ReadAt 是本机磁盘 I/O，持锁读会让所有
+		// 并发写入串行等这一把锁，实测把吞吐从 12 MB/s 压到 0.5 MB/s。
+		// 数据已确认在缓存里（ensureLocked 返回），文件内容不会再变。
 		if err == nil {
 			_, err = up.file.ReadAt(chunk, off)
 		}
-		up.mu.Unlock()
 		if err != nil {
 			// 中途失败：直接断流（ffmpeg 会报错而非静默卡死）。
 			chunkPool.Put(chunk[:cap(chunk)])

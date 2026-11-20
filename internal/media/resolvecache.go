@@ -27,9 +27,12 @@ const resolveCacheMaxEntries = 50
 var resolveCacheOverridePath string
 
 type resolveCacheEntry struct {
-	Resolved  Resolved  `json:"resolved"`
-	URLs      []string  `json:"urls"`
-	FetchedAt time.Time `json:"fetched_at"`
+	Resolved Resolved `json:"resolved"`
+	URLs     []string `json:"urls"`
+	// Headers 是每条直链必需的 HTTP 请求头（与 URLs 一一对应），
+	// 例如 B 站 CDN 校验 Referer。旧缓存条目无此字段，按空处理。
+	Headers   []map[string]string `json:"headers,omitempty"`
+	FetchedAt time.Time           `json:"fetched_at"`
 }
 
 var resolveCacheMu sync.Mutex
@@ -117,19 +120,49 @@ func resolveCacheKey(url string, maxHeight int) string {
 
 // lookupResolveCache 命中返回解析结果与直链。
 func lookupResolveCache(url string) (*Resolved, []string, bool) {
+	resolved, urls, _, ok := lookupResolveCacheWithHeaders(url)
+	return resolved, urls, ok
+}
+
+// lookupResolveCacheWithHeaders 命中返回解析结果、直链及其必需的请求头。
+func lookupResolveCacheWithHeaders(url string) (*Resolved, []string, []map[string]string, bool) {
 	resolveCacheMu.Lock()
 	defer resolveCacheMu.Unlock()
 	loadResolveCacheLocked()
 	e, ok := resolveCache[url]
 	if !ok || time.Since(e.FetchedAt) >= resolveCacheTTL || len(e.URLs) == 0 {
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
 	resolved := e.Resolved
-	return &resolved, append([]string(nil), e.URLs...), true
+	return &resolved, append([]string(nil), e.URLs...), cloneHeaders(e.Headers), true
+}
+
+// cloneHeaders 深拷贝请求头切片（与直链一一对应）。
+func cloneHeaders(headers []map[string]string) []map[string]string {
+	if len(headers) == 0 {
+		return nil
+	}
+	out := make([]map[string]string, len(headers))
+	for i, h := range headers {
+		if len(h) == 0 {
+			continue
+		}
+		c := make(map[string]string, len(h))
+		for k, v := range h {
+			c[k] = v
+		}
+		out[i] = c
+	}
+	return out
 }
 
 // storeResolveCache 写入内存与落盘。
 func storeResolveCache(url string, resolved *Resolved, urls []string) {
+	storeResolveCacheWithHeaders(url, resolved, urls, nil)
+}
+
+// storeResolveCacheWithHeaders 写入内存与落盘（含每条直链的请求头）。
+func storeResolveCacheWithHeaders(url string, resolved *Resolved, urls []string, headers []map[string]string) {
 	if resolved == nil || len(urls) == 0 {
 		return
 	}
@@ -139,6 +172,7 @@ func storeResolveCache(url string, resolved *Resolved, urls []string) {
 	resolveCache[url] = resolveCacheEntry{
 		Resolved:  *resolved,
 		URLs:      append([]string(nil), urls...),
+		Headers:   cloneHeaders(headers),
 		FetchedAt: time.Now(),
 	}
 	saveResolveCacheLocked()

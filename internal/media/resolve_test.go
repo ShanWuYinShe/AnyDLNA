@@ -205,25 +205,24 @@ func TestOutputArgsDualInput(t *testing.T) {
 	}
 }
 
-// TestNeedsPipeMode 校验拉流模式路由：CDN 拒绝 ffmpeg 直连的站点走管道。
+// TestNeedsPipeMode 校验拉流模式路由。
 //
-// 背景：B 站 mcdn 拒绝非浏览器 HTTP 客户端（ffmpeg/curl 返回 403 或拒绝连接，
-// yt-dlp 的 Python 下载栈正常），这些站点只能由 yt-dlp 下载经管道喂给 ffmpeg；
-// 其余站点走直链模式（yt-dlp 只解析，ffmpeg 直连直链负责全部操作）。
+// B 站曾因「mcdn 拒绝非浏览器客户端」被强制走管道模式，但实测真正原因是
+// 请求缺 Referer（CDN 校验 Referer 而非客户端类型）。Go 原生传输已按直链的
+// http_headers 回放该头，B 站因此改走直链模式。
+//
+// 为什么必须如此：管道模式要等 yt-dlp 解析页面、取流、攒够首帧才向 ffmpeg
+// 输出，实测首字节 15~22 秒；电视端等不到数据会在 15 秒断开重连，每次重连
+// 重建整条管道，永远卡在等首字节的循环里（表现为只有几十 KB/s 甚至 0 字节）。
 func TestNeedsPipeMode(t *testing.T) {
-	// extractor_key 大小写不稳定（实测 "BiliBili"/"Youtube"），都应正确路由。
-	for _, ext := range []string{"bilibili", "BiliBili", "BILIBILI"} {
-		if !NeedsPipeMode(ext) {
-			t.Errorf("%q 应走管道模式", ext)
-		}
-	}
-	for _, ext := range []string{"youtube", "Youtube", "youtube_music", "generic", "", "twitter"} {
+	// 当前没有站点需要管道模式；B 站已可按 Referer 直连。
+	for _, ext := range []string{"bilibili", "BiliBili", "BILIBILI", "youtube", "generic", ""} {
 		if NeedsPipeMode(ext) {
 			t.Errorf("%q 不应走管道模式", ext)
 		}
 	}
-	if NewURLTranscoder("u", false, Options{}, Plan{}, "bilibili", nil).pipe != true {
-		t.Error("bilibili 的 Transcoder 应为管道模式")
+	if NewURLTranscoder("u", false, Options{}, Plan{}, "bilibili", nil).pipe != false {
+		t.Error("bilibili 应走直链模式（CDN 校验的是 Referer，不是客户端类型）")
 	}
 	if NewURLTranscoder("u", false, Options{}, Plan{}, "youtube", nil).pipe != false {
 		t.Error("youtube 的 Transcoder 应为直链模式")

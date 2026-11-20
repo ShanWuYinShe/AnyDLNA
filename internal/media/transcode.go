@@ -27,13 +27,21 @@ import (
 // 通常几小时有效；1 小时内复用可避免电视每次重连都重新解析（约 5 秒）。
 const directCacheTTL = time.Hour
 
-// pipeExtractors 是必须走管道模式的站点（yt-dlp 下载、ffmpeg 只合并）。
-// 这些站点的 CDN 拒绝非浏览器 HTTP 客户端（实测 B 站 mcdn 对 ffmpeg/curl
-// 返回 403 或直接拒绝连接，yt-dlp 的 Python 下载栈则正常），ffmpeg 无法
-// 直连直链，只能由 yt-dlp 下载后经管道喂给 ffmpeg。其余站点走直链模式。
-var pipeExtractors = map[string]bool{
-	"bilibili": true,
-}
+// pipeExtractors 是必须走管道模式（yt-dlp 下载 → 管道 → ffmpeg）的站点。
+//
+// 目前为空：B 站曾因「mcdn 对 ffmpeg/curl 返回 403」被列入此表，但真正的
+// 原因是请求没带 Referer——CDN 校验的是 Referer 而非客户端类型。Go 原生
+// 传输已按直链的 http_headers 回放该头（见 NewUpstreamWithHeaders），
+// 实测带 Referer 后 B 站直链返回 206 且可多连接并发拉取。
+//
+// 为什么必须把 B 站移出管道模式：管道模式要等 yt-dlp 解析页面、取流、
+// 攒够首帧才向 ffmpeg 输出，实测首字节 15~22 秒；而电视端等不到数据会在
+// 15 秒断开重连，每次重连都重建整条管道，永远卡在「等首字节」的循环里，
+// 表现为电视端只有几十 KB/s 甚至 0 字节。Go 原生传输则能立即并发 Range
+// 拉取，秒级出首字节。
+//
+// 保留该机制是因为仍有站点可能拒绝对 ffmpeg 直连；新增时按站点名登记。
+var pipeExtractors = map[string]bool{}
 
 // NeedsPipeMode 报告该站点是否必须走管道模式（见 pipeExtractors）。
 // 大小写不敏感：yt-dlp 的 extractor_key 大小写不稳定（实测 B 站返回
@@ -59,7 +67,14 @@ type Transcoder struct {
 	// cachedURLs 是已解析的直链（1 条为一体流，2 条为分离音视频），
 	// cachedAt 为解析时间，TTL 内复用，过期或跳转失败时重取。仅直链模式用。
 	cachedURLs []string
-	cachedAt   time.Time
+	// cachedVariants 与 cachedURLs 一一对应，是同分辨率下的其它编码变体
+	// （见 formatVariants）：主链 CDN 节点不可达时依次尝试，避免因单个
+	// 坏节点导致整场投屏失败。
+	cachedVariants [][]resolvedVariant
+	// cachedHeaders 与 cachedURLs 一一对应，是每条直链必需的 HTTP 请求头
+	// （如 B 站 CDN 校验的 Referer），由 NewUpstreamWithHeaders 回放。
+	cachedHeaders []map[string]string
+	cachedAt      time.Time
 
 	// resolveURLs 可注入的直链刷新函数（单测用）；nil 时走默认 DirectURLs。
 	resolveURLs func(ctx context.Context) ([]string, error)
@@ -106,9 +121,16 @@ func NewCameraTranscoder(src *CameraSource, plan Plan) *Transcoder {
 // urls 是已解析的直链（ResolveDirect 附带返回），为空则首次拉流时回退到
 // DirectURLs 再取一次；传入时记为缓存起点，避免重复解析。
 func NewURLTranscoder(url string, isLive bool, opts Options, plan Plan, extractor string, urls []string) *Transcoder {
+	return NewURLTranscoderWithHeaders(url, isLive, opts, plan, extractor, urls, nil)
+}
+
+// NewURLTranscoderWithHeaders 同 NewURLTranscoder，额外接收每条直链必需的
+// HTTP 请求头（与 urls 一一对应，见 ResolveDirectWithHeaders）。
+func NewURLTranscoderWithHeaders(url string, isLive bool, opts Options, plan Plan, extractor string, urls []string, headers []map[string]string) *Transcoder {
 	tc := &Transcoder{srcURL: url, isLive: isLive, opts: opts, plan: plan.orTranscode(), pipe: NeedsPipeMode(extractor)}
 	if len(urls) > 0 {
 		tc.cachedURLs = append([]string(nil), urls...)
+		tc.cachedHeaders = cloneHeaders(headers)
 		tc.cachedAt = time.Now()
 	}
 	return tc
@@ -362,29 +384,48 @@ func (t *Transcoder) streamCameraLocked(w io.Writer) (func(), <-chan struct{}, e
 // directURLsLocked 返回本次拉流可用的直链（1 条一体流或 2 条分离音视频），
 // 优先复用 TTL 内的缓存，否则刷新；调用方须持有 t.mu。
 func (t *Transcoder) directURLsLocked(ctx context.Context) ([]string, error) {
+	urls, _, err := t.directURLsAndHeadersLocked(ctx)
+	return urls, err
+}
+
+// directURLsAndHeadersLocked 同 directURLsLocked，并返回与直链一一对应的
+// HTTP 请求头；调用方须持有 t.mu。
+func (t *Transcoder) directURLsAndHeadersLocked(ctx context.Context) ([]string, []map[string]string, error) {
 	if len(t.cachedURLs) > 0 && time.Since(t.cachedAt) < directCacheTTL {
-		return t.cachedURLs, nil
+		return t.cachedURLs, t.cachedHeaders, nil
 	}
-	urls, err := t.refreshURLs(ctx)
+	urls, headers, variants, err := t.refreshURLsWithHeaders(ctx)
 	if err != nil {
 		// 缓存过期但重取失败时，若有旧链（刚过期）仍可一试；
 		// 直链 expire 通常数小时，刚过 TTL 大概率仍有效。
 		if len(t.cachedURLs) > 0 {
-			return t.cachedURLs, nil
+			return t.cachedURLs, t.cachedHeaders, nil
 		}
-		return nil, err
+		return nil, nil, err
 	}
 	t.cachedURLs = urls
+	t.cachedHeaders = headers
+	t.cachedVariants = variants
 	t.cachedAt = time.Now()
-	return urls, nil
+	return urls, headers, nil
 }
 
-// refreshURLs 刷新直链：默认调 DirectURLs（yt-dlp -g）。
+// refreshURLs 刷新直链：默认调 DirectURLs。
 func (t *Transcoder) refreshURLs(ctx context.Context) ([]string, error) {
+	urls, _, _, err := t.refreshURLsWithHeaders(ctx)
+	return urls, err
+}
+
+// refreshURLsWithHeaders 刷新直链、必需的请求头与编码变体候选。
+func (t *Transcoder) refreshURLsWithHeaders(ctx context.Context) ([]string, []map[string]string, [][]resolvedVariant, error) {
 	if t.resolveURLs != nil {
-		return t.resolveURLs(ctx)
+		urls, err := t.resolveURLs(ctx)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		return urls, nil, nil, nil
 	}
-	return DirectURLs(ctx, t.srcURL, t.opts)
+	return resolveURLsWithVariants(ctx, t.srcURL, t.opts)
 }
 
 // isPlaylistURL 报告直链是否为播放列表（m3u8 等）：这类地址指向的相对分片
@@ -403,25 +444,27 @@ var prefetchBackoffs = []time.Duration{2 * time.Second, 5 * time.Second}
 // 建传输失败时换一组新直链再试一次（直链可能被上游瞬时拒绝，如 403）。
 // 调用方须持有 t.mu（StreamTo 持锁调用）。
 func (t *Transcoder) ensureDirectLocked() (inputs []string, audioIdx int, fallback bool, err error) {
-	urls, err := t.directURLsLocked(context.Background())
+	urls, headers, err := t.directURLsAndHeadersLocked(context.Background())
 	if err != nil {
 		return nil, 0, false, err
 	}
-	if inputs, audioIdx, fallback, err := t.buildDirectLocked(urls); err == nil || fallback {
+	if inputs, audioIdx, fallback, err := t.buildDirectLocked(urls, headers); err == nil || fallback {
 		return inputs, audioIdx, fallback, err
 	} else {
 		Diagf("传输搭建失败，换新直链再试: %v", err)
 	}
 	// 刷新直链再建一次；仍失败则如实返回。
 	t.cachedURLs = nil
-	if urls, err = t.directURLsLocked(context.Background()); err != nil {
+	t.cachedHeaders = nil
+	if urls, headers, err = t.directURLsAndHeadersLocked(context.Background()); err != nil {
 		return nil, 0, false, err
 	}
-	return t.buildDirectLocked(urls)
+	return t.buildDirectLocked(urls, headers)
 }
 
 // buildDirectLocked 用给定直链建上游与本机服务；调用方须持有 t.mu。
-func (t *Transcoder) buildDirectLocked(urls []string) (inputs []string, audioIdx int, fallback bool, err error) {
+// headers 与 urls 一一对应，是每条直链必需的 HTTP 请求头（可为 nil）。
+func (t *Transcoder) buildDirectLocked(urls []string, headers []map[string]string) (inputs []string, audioIdx int, fallback bool, err error) {
 	for _, u := range urls {
 		if isPlaylistURL(u) {
 			return nil, len(urls) - 1, true, nil
@@ -440,20 +483,40 @@ func (t *Transcoder) buildDirectLocked(urls []string) (inputs []string, audioIdx
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			up, uerr := NewUpstream(u, t.opts)
+			var h map[string]string
+			if i < len(headers) {
+				h = headers[i]
+			}
+			var vs []resolvedVariant
+			if i < len(t.cachedVariants) {
+				vs = t.cachedVariants[i]
+			}
+			up, uerr := newUpstreamWithVariants(u, h, vs, t.opts)
 			ups[i], uerrs[i] = up, uerr
 		}()
 	}
 	wg.Wait()
 	for i, uerr := range uerrs {
-		if uerr != nil {
-			for _, up := range ups {
-				if up != nil {
-					_ = up.Close()
-				}
-			}
-			return nil, 0, false, fmt.Errorf("第%d路上游失败: %w", i, uerr)
+		if uerr == nil {
+			continue
 		}
+		// 音视频是两条独立直链、落在不同 CDN 节点上，某条节点不可达很常见
+		// （PCDN 节点）。音频失败时降级为「只播画面」——声音缺失远比整场
+		// 投屏失败可接受，而且视频轨通常才是用户要看的。视频轨失败则无可
+		// 降级，如实报错。
+		if i > 0 {
+			Diagf("音频上游失败，本次降级为无声音播放: %v", uerr)
+			ups = ups[:1]
+			uerrs = uerrs[:1]
+			urls = urls[:1]
+			continue
+		}
+		for _, up := range ups {
+			if up != nil {
+				_ = up.Close()
+			}
+		}
+		return nil, 0, false, fmt.Errorf("第%d路上游失败: %w", i, uerr)
 	}
 	ln, lerr := net.Listen("tcp", "127.0.0.1:0")
 	if lerr != nil {
@@ -477,6 +540,40 @@ func (t *Transcoder) buildDirectLocked(urls []string) (inputs []string, audioIdx
 	t.directBase = "http://" + ln.Addr().String()
 	go func() { _ = srv.Serve(ln) }()
 	return t.directInputsLocked(), len(urls) - 1, false, nil
+}
+
+// newUpstreamWithVariants 先试主链，失败则依次尝试同分辨率的其它编码变体。
+//
+// B 站把同一分辨率的各编码（avc1/hev1/av01）放在不同 CDN 节点上，部分节点
+// 在特定网络下完全不可达（实测 TLS 握手超时），且重新解析仍返回同一节点。
+// 换编码变体是唯一能绕开坏节点的路径；编解码差异交由 plan 决定是否转码。
+func newUpstreamWithVariants(primary string, headers map[string]string, variants []resolvedVariant, opts Options) (*Upstream, error) {
+	up, err := NewUpstreamWithHeaders(primary, opts, headers)
+	if err == nil {
+		// 探测通过不代表分片拉得到：B 站 PCDN 节点常在探测后立刻 EOF。
+		// 把变体挂上，供 fetchChunk 在断流时切换续拉。
+		up.variants = variants
+		return up, nil
+	}
+	lastErr := err
+	Diagf("主链不可达 host=%s，尝试同分辨率其它编码变体（%d 个）", shortHost(primary), len(variants))
+	for i, v := range variants {
+		up, verr := NewUpstreamWithHeaders(v.URL, opts, v.Headers)
+		if verr == nil {
+			Diagf("已换用编码变体 %s host=%s", v.Codec, shortHost(v.URL))
+			// 剩下的变体继续作为后续备份。
+			up.variants = variants[:0:0]
+			if i+1 < len(variants) {
+				up.variants = append(up.variants, variants[i+1:]...)
+			}
+			return up, nil
+		}
+		lastErr = verr
+	}
+	if len(variants) > 0 {
+		return nil, fmt.Errorf("主链与 %d 个编码变体均不可达: %w", len(variants), lastErr)
+	}
+	return nil, lastErr
 }
 
 // directInputsLocked 返回本机服务的输入地址；调用方须持有 t.mu 且服务已建好。
@@ -515,10 +612,10 @@ func (t *Transcoder) PrefetchDirect(ctx context.Context) error {
 			// 换新直链：清缓存迫使 directURLsLocked 重新解析。
 			t.cachedURLs = nil
 		}
-		urls, err := t.directURLsLocked(ctx)
+		urls, headers, err := t.directURLsAndHeadersLocked(ctx)
 		if err != nil {
 			lastErr = err
-		} else if _, _, _, berr := t.buildDirectLocked(urls); berr != nil {
+		} else if _, _, _, berr := t.buildDirectLocked(urls, headers); berr != nil {
 			lastErr = berr
 		} else {
 			return nil
