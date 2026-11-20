@@ -86,6 +86,14 @@ type Transcoder struct {
 	directSrv  *http.Server
 	directUps  []*Upstream
 	directBase string
+	// directKey 标识当前传输是根据哪组直链建的（见 urlsKey）。用它而不是
+	// 比较片数，才能正确复用「音频降级后只剩视频一路」的传输。
+	directKey string
+	// audioUnavailable 表示本次会话的音频轨已确认拿不到（实测 B 站音频
+	// 常落在持续 403 的 upos 节点上）。置位后重连直接跳过音频探测：
+	// 否则电视端每次重连都要再等一遍音频探测失败（403 快速失败前是 6 秒），
+	// 期间视频轨已经就绪却不输出，电视端看到的就是「卡着不动」。
+	audioUnavailable bool
 
 	// lastStderr 仅用于出错诊断，记录最近一次启动的 stderr 缓冲。
 	lastStderr *limitBuffer
@@ -470,8 +478,25 @@ func (t *Transcoder) buildDirectLocked(urls []string, headers []map[string]strin
 			return nil, len(urls) - 1, true, nil
 		}
 	}
-	if t.directSrv != nil && len(t.directUps) == len(urls) {
-		return t.directInputsLocked(), len(urls) - 1, false, nil
+	// key 必须按**原始直链集**计算（截断前）：它标识的是「这台传输对应哪次
+	// 解析结果」。若用截断后的直链算，首次建（2 条）与后续重连（1 条）会
+	// 得到不同 key，永远不匹配、永远重建——正是要修的那个 bug。
+	key := urlsKey(urls)
+	// 复用已建好的传输：判据是「同一组直链」，不能用
+	// len(directUps) == len(urls) —— 音频降级后 directUps 只剩 1 个，与
+	// 原始直链条数永远不等，于是电视端每次重连都重建整台上游：实测连续
+	// 4 次重连每次重跑探测、每次又因音频 403 失败，电视端始终 0 字节。
+	if t.directSrv != nil && t.directKey == key {
+		return t.directInputsLocked(), len(t.directUps) - 1, false, nil
+	}
+	// 已知音频不可用（本会话内已确认 403）时只建视频一路，省掉一次注定
+	// 失败的探测。
+	if t.audioUnavailable && len(urls) > 1 {
+		Diagf("音频此前已确认不可用，本次只建视频传输")
+		urls = urls[:1]
+		if len(headers) > 1 {
+			headers = headers[:1]
+		}
 	}
 	// 直链变化或首次建：重建上游与服务。
 	// 多路探测并行（视频/音频各需 1 次 RTT 往返，串行直接翻倍）。
@@ -501,14 +526,17 @@ func (t *Transcoder) buildDirectLocked(urls []string, headers []map[string]strin
 			continue
 		}
 		// 音视频是两条独立直链、落在不同 CDN 节点上，某条节点不可达很常见
-		// （PCDN 节点）。音频失败时降级为「只播画面」——声音缺失远比整场
-		// 投屏失败可接受，而且视频轨通常才是用户要看的。视频轨失败则无可
-		// 降级，如实报错。
+		// （B 站音频常落在只对特定 UA/Referer 放行的 upos 节点上，实测持续
+		// 403）。音频失败时降级为「只播画面」——声音缺失远比整场投屏失败
+		// 可接受，而且视频轨通常才是用户要看的。视频轨失败则无可降级。
 		if i > 0 {
 			Diagf("音频上游失败，本次降级为无声音播放: %v", uerr)
+			if ups[i] != nil {
+				_ = ups[i].Close()
+			}
 			ups = ups[:1]
 			uerrs = uerrs[:1]
-			urls = urls[:1]
+			t.audioUnavailable = true
 			continue
 		}
 		for _, up := range ups {
@@ -537,6 +565,7 @@ func (t *Transcoder) buildDirectLocked(urls []string, headers []map[string]strin
 	}
 	srv := &http.Server{Handler: mux}
 	t.directLn, t.directSrv, t.directUps = ln, srv, ups
+	t.directKey = key
 	t.directBase = "http://" + ln.Addr().String()
 	go func() { _ = srv.Serve(ln) }()
 	return t.directInputsLocked(), len(urls) - 1, false, nil
@@ -574,6 +603,22 @@ func newUpstreamWithVariants(primary string, headers map[string]string, variants
 		return nil, fmt.Errorf("主链与 %d 个编码变体均不可达: %w", len(variants), lastErr)
 	}
 	return nil, lastErr
+}
+
+// urlsKey 把一组直链压成可比较的标识，用于判断传输能否复用。
+// 直链很长（上千字符），这里取各条的长度与首尾片段即可唯一区分
+// （同一次解析出的直链内容稳定，换直链时签名/expire 必然变化）。
+func urlsKey(urls []string) string {
+	var b strings.Builder
+	for _, u := range urls {
+		n := len(u)
+		head, tail := u, u
+		if n > 32 {
+			head, tail = u[:16], u[n-16:]
+		}
+		fmt.Fprintf(&b, "%d|%s|%s;", n, head, tail)
+	}
+	return b.String()
 }
 
 // directInputsLocked 返回本机服务的输入地址；调用方须持有 t.mu 且服务已建好。

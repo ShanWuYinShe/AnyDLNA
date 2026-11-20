@@ -256,6 +256,10 @@ func newUpstreamOnce(rawURL string, opts Options, headers map[string]string) (*U
 		// 再等一遍超时：B 站会给出多个 CDN 节点，其中 PCDN 节点（如
 		// *.edge.mountaintoys.cn）在部分网络下完全不可达，实测三次探测白等
 		// 57 秒。这里立即失败，让调用方换一组新直链（通常解析到不同节点）。
+		// 注意 403 不在此列：googlevideo 的瞬时限流确实会重试恢复，
+		// 一刀切会让这类瞬时拒绝变成投屏失败（TestUpstreamStatRetry 覆盖）。
+		// B 站音频节点持续 403 的拖累改由「记住音频不可用、重连不再探测」
+		// 解决（见 Transcoder.audioUnavailable），不必牺牲瞬时恢复能力。
 		if isConnError(serr) {
 			break
 		}
