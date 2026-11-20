@@ -21,7 +21,7 @@ func TestBilibiliSoak(t *testing.T) {
 		t.Skip("未设置 ANYDLNA_BILI_PAGE")
 	}
 	opts := Options{ProxyMode: ProxyModeSystem}
-	urls, headers, variants, err := resolveURLsWithVariants(context.Background(), page, opts)
+	urls, headers, variants, _, err := resolveURLsWithVariants(context.Background(), page, opts)
 	if err != nil {
 		t.Fatalf("解析失败: %v", err)
 	}

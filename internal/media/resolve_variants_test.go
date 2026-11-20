@@ -2,13 +2,14 @@ package media
 
 import "testing"
 
-// TestFormatVariants 从全量格式里挑同分辨率、同类编码的变体。
+// TestFormatVariants 候选必须覆盖全部可用档位，并按择优顺序排列。
 //
-// 两条硬约束：
-//  1. 分辨率必须相同——否则会悄悄改变清晰度；
-//  2. 编码类别必须相同（都是 H.264 或都不是）——plan 按主链编码一次性
-//     决定是否转码，切换变体不重算 plan。跨类别切换会让 ffmpeg 用
-//     -c:v copy 把 HEVC/AV1 塞进 MPEG-TS，电视普遍解不了（黑屏/花屏）。
+// 背景：B 站把各档位分散在多个 CDN 节点上，实测相当比例节点直接
+// Connection refused，且重新解析总是返回同一坏节点。只留「同分辨率同编码」
+// 一个候选时，主链一坏就彻底没得选——必须一次解析就留下全部候选。
+//
+// 排序意图：先同分辨率同编码（画质与转码策略都不变）→ 同分辨率异编码
+// （画质不变，可能要转码）→ 降分辨率（画质降但通常免转码）。
 func TestFormatVariants(t *testing.T) {
 	out := []byte(`{
 		"title":"T","extractor_key":"BiliBili",
@@ -23,28 +24,32 @@ func TestFormatVariants(t *testing.T) {
 		]
 	}`)
 	vs := formatVariants(out, "https://n1/avc1-1080")
-	if len(vs) != 1 {
-		t.Fatalf("应只留 1 个同类编码变体，实际 %d: %+v", len(vs), vs)
+	if len(vs) != 4 {
+		t.Fatalf("应保留 4 个视频候选，实际 %d: %+v", len(vs), vs)
 	}
+	// 第一条必须是同分辨率同编码（最优）。
 	if vs[0].URL != "https://n2/avc1-1080" {
-		t.Errorf("应保留同为 H.264 的 n2，实际 %s", vs[0].URL)
+		t.Errorf("首选应为同分辨率同编码的 n2，实际 %s", vs[0].URL)
 	}
+	// 同分辨率的异编码候选排在降分辨率之前。
+	order := make(map[string]int, len(vs))
+	for i, v := range vs {
+		order[v.URL] = i
+	}
+	if order["https://n3/hev1-1080"] > order["https://n5/avc1-720"] {
+		t.Error("同分辨率异编码候选应排在降分辨率候选之前")
+	}
+	// 音频不能混进视频候选。
 	for _, v := range vs {
-		if v.URL == "https://n3/hev1-1080" || v.URL == "https://n4/av01-1080" {
-			t.Error("HEVC/AV1 变体会让 -c:v copy 直通出电视解不了的流")
-		}
-		if v.URL == "https://n5/avc1-720" {
-			t.Error("不同分辨率的格式不能作为变体（会改变清晰度）")
-		}
 		if v.URL == "https://n6/audio" {
 			t.Error("音频不能顶上视频轨")
 		}
 	}
-
-	// 主链是 HEVC 时，变体也只能是 HEVC（此时 plan 已按转码走，同类才安全）。
-	vs = formatVariants(out, "https://n3/hev1-1080")
-	if len(vs) != 1 || vs[0].URL != "https://n4/av01-1080" {
-		t.Errorf("HEVC 主链应只接受非 H.264 变体，实际 %+v", vs)
+	// 主链自身不出现在候选里。
+	for _, v := range vs {
+		if v.URL == "https://n1/avc1-1080" {
+			t.Error("主链不应重复出现在候选中")
+		}
 	}
 
 	// JSON 非法或主链未知时返回空。
@@ -56,7 +61,7 @@ func TestFormatVariants(t *testing.T) {
 	}
 }
 
-// TestCodecFamily 编码归类决定变体能否互换。
+// TestCodecFamily 编码归类决定重算 plan 时的能力判断。
 func TestCodecFamily(t *testing.T) {
 	cases := map[string]string{
 		"avc1.640032":   "h264",

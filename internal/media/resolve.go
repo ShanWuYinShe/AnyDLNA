@@ -237,59 +237,69 @@ func parseResolveDetail(out []byte) (*Resolved, []string, []map[string]string, e
 	return resolved, urls, headers, nil
 }
 
-// formatVariants 返回与 primary 同分辨率、**同类编码**的其它变体直链。
+// formatVariants 返回一路直链的全部候选（同类型：视频对视频、音频对音频），
+// 按「优先保持原分辨率、其次原编码类别」排序，供传输层择优。
 //
-// 为什么需要它：B 站把同一分辨率的各编码（avc1 / hvc1 / av01）放在不同
-// CDN 节点上。实测部分节点（如 xy58x19x174x165xy.mcdn.bilivideo.cn）在特定
-// 网络下完全不可达（TLS 握手超时或拉取中途 EOF），而重新解析仍会返回同一
-// 节点，光靠「换直链重试」救不回来。同分辨率换变体即可绕开坏节点。
+// 为什么需要它：B 站把同一视频的各档位分散在多个 CDN 节点上，实测相当比例
+// 节点直接拒绝连接（连续 6 次解析全落同一坏节点）。官方客户端稳定，是因为
+// 它一次拿到全部节点、自己挑可用的；我们此前只取 yt-dlp 选中的一条，等于
+// 把稳定性交给运气。重新解析也无法换节点（实测总是返回同一个），所以必须
+// 一次解析就留下全部候选。
 //
-// **必须限定同类编码**：plan（是否转码）在投屏时按主链编码一次性定好，
-// 切换变体只换地址、不重算 plan。若允许 avc1 主链切到 hvc1/av01 变体，
-// ffmpeg 仍会按 plan 用 -c:v copy 把 HEVC/AV1 原样塞进 MPEG-TS——电视
-// 普遍解不了这种组合，表现是黑屏/花屏。同类编码切换则画质、体积、
-// 是否转码全部不变，纯粹是换一条到同一份内容的路。
+// 排序意图：先同分辨率同编码（画质与转码策略都不变）→ 再同分辨率异编码
+// （画质不变，可能需要转码）→ 最后降分辨率（画质下降，但通常能免转码）。
+// 调用方按顺序探测，取第一个真正可用的。
 func formatVariants(out []byte, primary string) []resolvedVariant {
 	var raw resolveRaw
 	if err := json.Unmarshal(out, &raw); err != nil {
 		return nil
 	}
-	// 找到主链所属格式的分辨率、类型与编码类别。
 	var wantHeight int
-	var wantFamily string
 	isAudio := false
 	found := false
 	for _, f := range raw.AllFormats {
 		if strings.TrimSpace(f.URL) == strings.TrimSpace(primary) {
-			wantHeight = f.Height
-			isAudio = f.VCodec == "none"
-			wantFamily = codecFamily(f.VCodec)
-			found = true
+			wantHeight, isAudio, found = f.Height, f.VCodec == "none", true
 			break
 		}
 	}
 	if !found {
 		return nil
 	}
-	var out2 []resolvedVariant
+	var same, crossCodec, lower []resolvedVariant
 	for _, f := range raw.AllFormats {
 		u := strings.TrimSpace(f.URL)
 		if !strings.HasPrefix(u, "http") || u == strings.TrimSpace(primary) {
 			continue
 		}
-		if (f.VCodec == "none") != isAudio || f.Height != wantHeight {
-			continue
-		}
-		if codecFamily(f.VCodec) != wantFamily {
+		if (f.VCodec == "none") != isAudio {
 			continue
 		}
 		h := f.Headers
 		if len(h) == 0 {
 			h = raw.Headers
 		}
-		out2 = append(out2, resolvedVariant{URL: u, Headers: h, Codec: f.VCodec})
+		v := resolvedVariant{URL: u, Headers: h, Codec: f.VCodec, Height: f.Height, Tbr: f.Tbr, Acodec: f.ACodec}
+		switch {
+		case f.Height == wantHeight && codecFamily(f.VCodec) == codecFamily(codecOf(raw, primary)):
+			same = append(same, v)
+		case f.Height == wantHeight:
+			crossCodec = append(crossCodec, v)
+		case f.Height < wantHeight:
+			lower = append(lower, v)
+		}
 	}
-	return out2
+	return append(append(same, crossCodec...), lower...)
+}
+
+// codecOf 返回指定直链对应的编码名（找不到时返回空串）。
+func codecOf(raw resolveRaw, url string) string {
+	for _, f := range raw.AllFormats {
+		if strings.TrimSpace(f.URL) == strings.TrimSpace(url) {
+			return f.VCodec
+		}
+	}
+	return ""
 }
 
 // codecFamily 把编码名归到「是否 H.264」两大类。
@@ -309,11 +319,23 @@ func codecFamily(codec string) string {
 	}
 }
 
-// resolvedVariant 是同一分辨率下的另一个编码变体直链。
+// resolvedVariant 是一路在线流的候选直链。
+//
+// 为什么保留跨编码候选：B 站把同一视频的各档位（分辨率×编码）分散在多个
+// CDN 节点上，实测相当比例节点直接 Connection refused（连续 6 次解析全
+// 落到同一坏节点）。官方客户端之所以稳定，是因为它一次拿到全部节点、
+// 自己挑可用的；我们此前只取 yt-dlp 选中的那一条，等于把稳定性交给运气。
+// 因此这里保留全部候选，由传输层并发探测后择优。
+//
+// Height/Codec 让调用方在切换候选后能重算 plan（是否转码）：换了分辨率
+// 或编码，输出策略必须跟着变，否则会把设备解不了的流硬塞过去。
 type resolvedVariant struct {
 	URL     string
 	Headers map[string]string
 	Codec   string
+	Height  int
+	Tbr     float64
+	Acodec  string
 }
 
 // ResolveDirect 一次 -J 调用同时返回元数据与直链。
@@ -436,15 +458,15 @@ func DirectURLs(ctx context.Context, url string, opts Options) ([]string, error)
 // 校验 Referer，缺该头直接 403（表现为投屏必然失败）。-J 只取元数据不下载，
 // 一次调用同时给出地址与请求头，代价与 -g 相当。
 func resolveURLsWithHeaders(ctx context.Context, url string, opts Options) ([]string, []map[string]string, error) {
-	urls, headers, _, err := resolveURLsWithVariants(ctx, url, opts)
+	urls, headers, _, _, err := resolveURLsWithVariants(ctx, url, opts)
 	return urls, headers, err
 }
 
 // resolveURLsWithVariants 取直链、请求头与每条直链的编码变体候选
 // （同分辨率的其它编码，用于绕开不可达的 CDN 节点，见 formatVariants）。
-func resolveURLsWithVariants(ctx context.Context, url string, opts Options) ([]string, []map[string]string, [][]resolvedVariant, error) {
+func resolveURLsWithVariants(ctx context.Context, url string, opts Options) ([]string, []map[string]string, [][]resolvedVariant, []streamInfo, error) {
 	if !HasYtDlp() {
-		return nil, nil, nil, MissingToolError("yt-dlp")
+		return nil, nil, nil, nil, MissingToolError("yt-dlp")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
@@ -456,22 +478,32 @@ func resolveURLsWithVariants(ctx context.Context, url string, opts Options) ([]s
 	out, err := cmd.Output()
 	if err != nil {
 		if msg := ytDlpErrTail(stderr.String()); msg != "" {
-			return nil, nil, nil, fmt.Errorf("获取直链失败: %s", msg)
+			return nil, nil, nil, nil, fmt.Errorf("获取直链失败: %s", msg)
 		}
-		return nil, nil, nil, fmt.Errorf("获取直链失败（站点不支持、网络不可达或代理不可用）: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("获取直链失败（站点不支持、网络不可达或代理不可用）: %w", err)
 	}
 	_, urls, headers, perr := parseResolveDetail(out)
 	if perr != nil {
-		return nil, nil, nil, perr
+		return nil, nil, nil, nil, perr
 	}
 	if len(urls) == 0 || len(urls) > 2 {
-		return nil, nil, nil, fmt.Errorf("获取直链失败（返回 %d 条地址）", len(urls))
+		return nil, nil, nil, nil, fmt.Errorf("获取直链失败（返回 %d 条地址）", len(urls))
 	}
 	variants := make([][]resolvedVariant, len(urls))
-	for i, u := range urls {
-		variants[i] = formatVariants(out, u)
+	infos := make([]streamInfo, len(urls))
+	var raw resolveRaw
+	if err := json.Unmarshal(out, &raw); err == nil {
+		for i, u := range urls {
+			variants[i] = formatVariants(out, u)
+			for _, f := range raw.AllFormats {
+				if strings.TrimSpace(f.URL) == strings.TrimSpace(u) {
+					infos[i] = streamInfo{videoCodec: f.VCodec, audioCodec: f.ACodec, height: f.Height}
+					break
+				}
+			}
+		}
 	}
-	return urls, headers, variants, nil
+	return urls, headers, variants, infos, nil
 }
 
 // ytDlpDirectArgs 构造取直链（-g）的 yt-dlp 参数：只取地址不下载。

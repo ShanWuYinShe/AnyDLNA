@@ -80,6 +80,30 @@ func normalizeUpstreamHeaders(headers map[string]string) map[string]string {
 	return out
 }
 
+// CurrentStream 返回当前实际在用的流信息（编码、分辨率）。
+// 切换候选后编码可能变化，调用方据此重算输出策略。
+func (up *Upstream) CurrentStream() (videoCodec, audioCodec string, height int) {
+	up.mu.Lock()
+	idx := up.variantIdx
+	vcodec, acodec, h := up.videoCodec, up.audioCodec, up.height
+	var v resolvedVariant
+	if idx > 0 && idx-1 < len(up.variants) {
+		v = up.variants[idx-1]
+	}
+	up.mu.Unlock()
+	if v.URL != "" {
+		return v.Codec, v.Acodec, v.Height
+	}
+	return vcodec, acodec, h
+}
+
+// SetStreamInfo 记录主链的编码信息（建上游时由调用方填入）。
+func (up *Upstream) SetStreamInfo(videoCodec, audioCodec string, height int) {
+	up.mu.Lock()
+	up.videoCodec, up.audioCodec, up.height = videoCodec, audioCodec, height
+	up.mu.Unlock()
+}
+
 // currentSource 返回当前应请求的地址与请求头。
 func (up *Upstream) currentSource() (string, map[string]string) {
 	up.mu.Lock()
@@ -188,12 +212,16 @@ type Upstream struct {
 	// 与 upstreamUA 合并后随每个请求发出。B 站 CDN 校验 Referer，
 	// 缺失时直接 403，表现为投屏必然失败。
 	headers map[string]string
-	// variants 是同分辨率下的其它编码变体：当前节点连续拉取失败
-	// （EOF/超时）时切换过去续拉。B 站把不同编码放在不同 CDN 节点上，
-	// 部分节点会在播放中途断流，换变体是唯一能继续播放的路径。
+	// variants 是其它候选直链：当前节点拉取失败（EOF/超时）时切换过去续拉。
+	// B 站把各档位放在不同 CDN 节点上，部分节点会中途断流，换候选是唯一
+	// 能继续播放的路径。变体的分辨率/编码可能不同，切换后需重算 plan。
 	variants []resolvedVariant
-	// variantIdx 是当前使用的变体序号（0 = 主链）。
+	// variantIdx 是当前使用的候选序号（0 = 主链）。
 	variantIdx int
+	// 主链自身的编码信息，用于调用方判断是否需要重算 plan。
+	videoCodec string
+	audioCodec string
+	height     int
 
 	mu     sync.Mutex
 	cond   *sync.Cond
