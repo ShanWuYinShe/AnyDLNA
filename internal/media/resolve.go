@@ -165,24 +165,48 @@ func Resolve(ctx context.Context, url string, opts Options) (*Resolved, error) {
 // 有它就能一次调用同时拿到元数据与直链，省掉第二次 -g 调用
 // （慢代理下每次调用都可能是几十秒，两次串行就是失败翻倍）。
 type resolveRaw struct {
-	Title     string  `json:"title"`
-	Duration  float64 `json:"duration"`
-	IsLive    bool    `json:"is_live"`
-	Extractor string  `json:"extractor_key"`
-	Uploader  string  `json:"uploader"`
-	VCodec    string  `json:"vcodec"`
-	ACodec    string  `json:"acodec"`
-	Formats   []struct {
-		URL string `json:"url"`
+	Title     string            `json:"title"`
+	Duration  float64           `json:"duration"`
+	IsLive    bool              `json:"is_live"`
+	Extractor string            `json:"extractor_key"`
+	Uploader  string            `json:"uploader"`
+	VCodec    string            `json:"vcodec"`
+	ACodec    string            `json:"acodec"`
+	Headers   map[string]string `json:"http_headers"`
+	// AllFormats 是全部分轨（含未选中的分辨率与编码），用于在所选直链的
+	// CDN 节点不可达时，改用同一分辨率下的其它编码变体。
+	AllFormats []struct {
+		URL      string            `json:"url"`
+		FormatID string            `json:"format_id"`
+		VCodec   string            `json:"vcodec"`
+		ACodec   string            `json:"acodec"`
+		Height   int               `json:"height"`
+		Tbr      float64           `json:"tbr"`
+		Headers  map[string]string `json:"http_headers"`
+	} `json:"formats"`
+	Formats []struct {
+		URL     string            `json:"url"`
+		Headers map[string]string `json:"http_headers"`
 	} `json:"requested_formats"`
 }
 
-// parseResolveJSON 从 -J 输出解析元数据与直链（1 条一体流或 2 条分离音视频）。
+// parseResolveJSON 从 -J 输出解析元数据、直链与其必需的请求头。
 // 直链缺失或超过 2 条时返回空 urls，调用方回退到 DirectURLs 再取一次。
 func parseResolveJSON(out []byte) (*Resolved, []string, error) {
+	resolved, urls, _, err := parseResolveDetail(out)
+	return resolved, urls, err
+}
+
+// parseResolveDetail 同 parseResolveJSON，额外返回每条直链必需的 HTTP 请求头
+// （与 urls 一一对应；缺失时为空 map）。
+//
+// 这些头不是可选项：B 站直链（upos-sz-mirror*.bilivideo.com、mcdn）校验
+// Referer，缺失时 CDN 直接返回 403。Go 原生传输（Upstream）必须按直链原样
+// 回放这些头，否则表现为「上游探测第 1 次失败 ... 返回 403」。
+func parseResolveDetail(out []byte) (*Resolved, []string, []map[string]string, error) {
 	var raw resolveRaw
 	if err := json.Unmarshal(out, &raw); err != nil {
-		return nil, nil, fmt.Errorf("解析 yt-dlp 输出失败: %w", err)
+		return nil, nil, nil, fmt.Errorf("解析 yt-dlp 输出失败: %w", err)
 	}
 	resolved := &Resolved{
 		Title:       raw.Title,
@@ -194,29 +218,123 @@ func parseResolveJSON(out []byte) (*Resolved, []string, error) {
 		AudioCodec:  raw.ACodec,
 	}
 	var urls []string
+	var headers []map[string]string
 	for _, f := range raw.Formats {
 		if u := strings.TrimSpace(f.URL); strings.HasPrefix(u, "http") {
 			urls = append(urls, u)
+			h := f.Headers
+			// 部分站点把请求头挂在顶层 http_headers 而非每个 format 上，
+			// 分轨缺失时回退到顶层。
+			if len(h) == 0 {
+				h = raw.Headers
+			}
+			headers = append(headers, h)
 		}
 	}
 	if len(urls) == 0 || len(urls) > 2 {
-		urls = nil
+		return resolved, nil, nil, nil
 	}
-	return resolved, urls, nil
+	return resolved, urls, headers, nil
+}
+
+// formatVariants 返回与 primary 同分辨率、**同类编码**的其它变体直链。
+//
+// 为什么需要它：B 站把同一分辨率的各编码（avc1 / hvc1 / av01）放在不同
+// CDN 节点上。实测部分节点（如 xy58x19x174x165xy.mcdn.bilivideo.cn）在特定
+// 网络下完全不可达（TLS 握手超时或拉取中途 EOF），而重新解析仍会返回同一
+// 节点，光靠「换直链重试」救不回来。同分辨率换变体即可绕开坏节点。
+//
+// **必须限定同类编码**：plan（是否转码）在投屏时按主链编码一次性定好，
+// 切换变体只换地址、不重算 plan。若允许 avc1 主链切到 hvc1/av01 变体，
+// ffmpeg 仍会按 plan 用 -c:v copy 把 HEVC/AV1 原样塞进 MPEG-TS——电视
+// 普遍解不了这种组合，表现是黑屏/花屏。同类编码切换则画质、体积、
+// 是否转码全部不变，纯粹是换一条到同一份内容的路。
+func formatVariants(out []byte, primary string) []resolvedVariant {
+	var raw resolveRaw
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil
+	}
+	// 找到主链所属格式的分辨率、类型与编码类别。
+	var wantHeight int
+	var wantFamily string
+	isAudio := false
+	found := false
+	for _, f := range raw.AllFormats {
+		if strings.TrimSpace(f.URL) == strings.TrimSpace(primary) {
+			wantHeight = f.Height
+			isAudio = f.VCodec == "none"
+			wantFamily = codecFamily(f.VCodec)
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil
+	}
+	var out2 []resolvedVariant
+	for _, f := range raw.AllFormats {
+		u := strings.TrimSpace(f.URL)
+		if !strings.HasPrefix(u, "http") || u == strings.TrimSpace(primary) {
+			continue
+		}
+		if (f.VCodec == "none") != isAudio || f.Height != wantHeight {
+			continue
+		}
+		if codecFamily(f.VCodec) != wantFamily {
+			continue
+		}
+		h := f.Headers
+		if len(h) == 0 {
+			h = raw.Headers
+		}
+		out2 = append(out2, resolvedVariant{URL: u, Headers: h, Codec: f.VCodec})
+	}
+	return out2
+}
+
+// codecFamily 把编码名归到「是否 H.264」两大类。
+//
+// 之所以只分两类而不是逐个编码细分：能不能免转码直通，取决于设备能否解
+// 该编码（H.264 8-bit 是通用基线，HEVC/AV1/VP9 则普遍不行），而这一判断
+// 与具体 profile 无关。归成两类后，变体切换不会跨过这条能力边界。
+func codecFamily(codec string) string {
+	c := normalizeCodec(codec)
+	switch {
+	case c == "none" || c == "":
+		return c
+	case isH264(c):
+		return "h264"
+	default:
+		return "other"
+	}
+}
+
+// resolvedVariant 是同一分辨率下的另一个编码变体直链。
+type resolvedVariant struct {
+	URL     string
+	Headers map[string]string
+	Codec   string
 }
 
 // ResolveDirect 一次 -J 调用同时返回元数据与直链。
 // 直链随 -J 附带返回（见 parseResolveJSON），不再单独调 -g，
 // 把慢代理下两次串行调用的耗时与失败率都砍掉一半。
 func ResolveDirect(ctx context.Context, url string, opts Options) (*Resolved, []string, error) {
+	resolved, urls, _, err := ResolveDirectWithHeaders(ctx, url, opts)
+	return resolved, urls, err
+}
+
+// ResolveDirectWithHeaders 同 ResolveDirect，额外返回每条直链必需的 HTTP 请求头
+// （与 urls 一一对应），供 Go 原生传输回放 Referer/UA 等站点校验头。
+func ResolveDirectWithHeaders(ctx context.Context, url string, opts Options) (*Resolved, []string, []map[string]string, error) {
 	if !HasYtDlp() {
-		return nil, nil, MissingToolError("yt-dlp")
+		return nil, nil, nil, MissingToolError("yt-dlp")
 	}
 	// 缓存命中直接返回（重复投屏省 7~30 秒）；直链 TTL 内有效，见 resolvecache.go。
 	key := resolveCacheKey(url, opts.MaxHeight)
-	if resolved, urls, ok := lookupResolveCache(key); ok {
+	if resolved, urls, headers, ok := lookupResolveCacheWithHeaders(key); ok {
 		Diagf("解析命中缓存 站点=%s 直链=%d条 url=%.80s", resolved.Extractor, len(urls), url)
-		return resolved, urls, nil
+		return resolved, urls, headers, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
@@ -230,18 +348,18 @@ func ResolveDirect(ctx context.Context, url string, opts Options) (*Resolved, []
 	if err != nil {
 		Diagf("解析失败 %.1fs url=%.80s err=%v 舍尾=%.200s", time.Since(t0).Seconds(), url, err, ytDlpErrTail(stderr.String()))
 		if msg := ytDlpErrTail(stderr.String()); msg != "" {
-			return nil, nil, fmt.Errorf("解析视频失败: %s", msg)
+			return nil, nil, nil, fmt.Errorf("解析视频失败: %s", msg)
 		}
-		return nil, nil, fmt.Errorf("解析视频失败（站点不支持、网络不可达或代理不可用）: %w", err)
+		return nil, nil, nil, fmt.Errorf("解析视频失败（站点不支持、网络不可达或代理不可用）: %w", err)
 	}
-	resolved, urls, perr := parseResolveJSON(out)
+	resolved, urls, headers, perr := parseResolveDetail(out)
 	if perr != nil {
 		Diagf("解析失败 %.1fs url=%.80s err=%v", time.Since(t0).Seconds(), url, perr)
-		return nil, nil, perr
+		return nil, nil, nil, perr
 	}
 	Diagf("解析成功 %.1fs 站点=%s 直链=%d条 url=%.80s", time.Since(t0).Seconds(), resolved.Extractor, len(urls), url)
-	storeResolveCache(key, resolved, urls)
-	return resolved, urls, nil
+	storeResolveCacheWithHeaders(key, resolved, urls, headers)
+	return resolved, urls, headers, nil
 }
 
 // ytDlpErrTail 提取 yt-dlp 报错的最后几行（错误摘要在末尾），最长 300 字符。
@@ -303,37 +421,57 @@ func ytDlpSingleStreamArgs(url, selector string, startSec float64, isLive bool, 
 	return append(args, "-o", "-", url)
 }
 
-// DirectURLs 用 yt-dlp 解析出音视频直链（-g，只取地址不下载）。
+// DirectURLs 用 yt-dlp 解析出音视频直链及其必需的请求头。
 // 与 Resolve 使用同一 formatSelector，保证报告的编码与实际拉流一致。
 // 返回 1 条 URL 表示一体流（progressive，音视频已合并），2 条为分离的
 // 视频与音频直链；其他情况返回错误。opts 语义见 ytDlpCommonArgs。
 func DirectURLs(ctx context.Context, url string, opts Options) ([]string, error) {
+	urls, _, err := resolveURLsWithHeaders(ctx, url, opts)
+	return urls, err
+}
+
+// resolveURLsWithHeaders 取直链及其必需的 HTTP 请求头。
+//
+// 用 -J 而非 -g：-g 只输出地址，拿不到 http_headers，而 B 站等站点的 CDN
+// 校验 Referer，缺该头直接 403（表现为投屏必然失败）。-J 只取元数据不下载，
+// 一次调用同时给出地址与请求头，代价与 -g 相当。
+func resolveURLsWithHeaders(ctx context.Context, url string, opts Options) ([]string, []map[string]string, error) {
+	urls, headers, _, err := resolveURLsWithVariants(ctx, url, opts)
+	return urls, headers, err
+}
+
+// resolveURLsWithVariants 取直链、请求头与每条直链的编码变体候选
+// （同分辨率的其它编码，用于绕开不可达的 CDN 节点，见 formatVariants）。
+func resolveURLsWithVariants(ctx context.Context, url string, opts Options) ([]string, []map[string]string, [][]resolvedVariant, error) {
 	if !HasYtDlp() {
-		return nil, MissingToolError("yt-dlp")
+		return nil, nil, nil, MissingToolError("yt-dlp")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
-	cmd := toolCmdContext(ctx, "yt-dlp", ytDlpDirectArgs(url, opts)...)
+	args := append([]string{"-J", "--no-playlist", "--no-warnings", "-f", formatSelectorFor(opts.MaxHeight)}, ytDlpCommonArgs(opts)...)
+	cmd := toolCmdContext(ctx, "yt-dlp", append(args, url)...)
 	var stderr limitBuffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
 		if msg := ytDlpErrTail(stderr.String()); msg != "" {
-			return nil, fmt.Errorf("获取直链失败: %s", msg)
+			return nil, nil, nil, fmt.Errorf("获取直链失败: %s", msg)
 		}
-		return nil, fmt.Errorf("获取直链失败（站点不支持、网络不可达或代理不可用）: %w", err)
+		return nil, nil, nil, fmt.Errorf("获取直链失败（站点不支持、网络不可达或代理不可用）: %w", err)
 	}
-	var urls []string
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if line = strings.TrimSpace(line); strings.HasPrefix(line, "http") {
-			urls = append(urls, line)
-		}
+	_, urls, headers, perr := parseResolveDetail(out)
+	if perr != nil {
+		return nil, nil, nil, perr
 	}
 	if len(urls) == 0 || len(urls) > 2 {
-		return nil, fmt.Errorf("获取直链失败（返回 %d 条地址）", len(urls))
+		return nil, nil, nil, fmt.Errorf("获取直链失败（返回 %d 条地址）", len(urls))
 	}
-	return urls, nil
+	variants := make([][]resolvedVariant, len(urls))
+	for i, u := range urls {
+		variants[i] = formatVariants(out, u)
+	}
+	return urls, headers, variants, nil
 }
 
 // ytDlpDirectArgs 构造取直链（-g）的 yt-dlp 参数：只取地址不下载。

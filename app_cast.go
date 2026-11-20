@@ -257,7 +257,7 @@ func (a *App) CastURL(udn, rawURL, titleOverride string) (*CastStatus, error) {
 	// 慢代理下每次 yt-dlp 调用都可能是几十秒，两次串行就是失败翻倍。
 	// socks 代理不再拦截：上游拉取已是 Go 原生 http.Client，
 	// http/https 与 socks5 都支持（见 newProxyHTTPClient）。
-	resolved, urls, err := media.ResolveDirect(ctx, rawURL, opts)
+	resolved, urls, headers, err := media.ResolveDirectWithHeaders(ctx, rawURL, opts)
 	if err != nil {
 		media.Diagf("投屏失败 解析 url=%.80s err=%v", rawURL, err)
 		return nil, err
@@ -266,7 +266,7 @@ func (a *App) CastURL(udn, rawURL, titleOverride string) (*CastStatus, error) {
 		rawURL, resolved.Title, resolved.DurationSec, resolved.IsLive, resolved.Extractor, len(urls))
 	plan := media.PlanForOnline(resolved.VideoCodec, resolved.AudioCodec, caps)
 	title := a.effectiveCastTitle(resolved.Title, titleOverride)
-	sessionID, err := srv.AddTranscodeURL(ctx, rawURL, title, resolved.IsLive, opts, plan, resolved.Extractor, urls)
+	sessionID, err := srv.AddTranscodeURLWithHeaders(ctx, rawURL, title, resolved.IsLive, opts, plan, resolved.Extractor, urls, headers)
 	if err != nil {
 		media.Diagf("投屏失败 预热 会话=%s err=%v", sessionID, err)
 		return nil, err
