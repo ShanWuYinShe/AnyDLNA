@@ -56,7 +56,7 @@ func TestBufferDepthBenefit(t *testing.T) {
 	var maxWait time.Duration
 	start := time.Now()
 	for read < 60<<20 && time.Since(start) < 45*time.Second {
-		want := time.Duration(float64(read)/bitrate*float64(time.Second))
+		want := time.Duration(float64(read) / bitrate * float64(time.Second))
 		if elapsed := time.Since(start); elapsed < want {
 			time.Sleep(want - elapsed)
 		}
