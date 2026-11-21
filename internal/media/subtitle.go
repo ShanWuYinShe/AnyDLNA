@@ -1,14 +1,20 @@
 package media
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/transform"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // subtitleExtensions 支持的外挂字幕后缀及优先级。
@@ -125,4 +131,122 @@ func ExtractEmbeddedSubtitle(ctx context.Context, videoPath string) (string, err
 	}
 	_ = os.Remove(destPath)
 	return "", errors.New("提取字幕为空")
+}
+
+// NormalizeSubtitleEncoding 检测并归一化字幕文件字符编码为纯 UTF-8，
+// 自动剥离 UTF-8 BOM，并将 GBK / GB2312 / GB18030 等中文常见编码转码为 UTF-8。
+// 彻底杜绝三星、LG、索尼等智能电视因字符集不匹配导致的字幕乱码。
+func NormalizeSubtitleEncoding(data []byte) []byte {
+	if len(data) == 0 {
+		return data
+	}
+	// 1. 若带 UTF-8 BOM（\xef\xbb\xbf），剥离之（部分电视遇到 BOM 会报解析错误或首行显示乱码字符）
+	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
+
+	// 2. 检查是否为有效 UTF-8
+	if utf8.Valid(data) {
+		return data
+	}
+
+	// 3. 非 UTF-8，尝试按 GBK / GB18030 转码
+	reader := transform.NewReader(bytes.NewReader(data), simplifiedchinese.GB18030.NewDecoder())
+	decoded, err := io.ReadAll(reader)
+	if err == nil && len(decoded) > 0 && utf8.Valid(decoded) {
+		return decoded
+	}
+
+	// 转码失败或未知编码时回退原数据
+	return data
+}
+
+// ConvertASSToSRT 把 ASS / SSA 特效字幕解析并转换为所有电视均可兼容的标准 SRT 文本。
+func ConvertASSToSRT(assData []byte) []byte {
+	lines := strings.Split(string(assData), "\n")
+	var srtBuf strings.Builder
+	idx := 1
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(strings.ToLower(line), "dialogue:") {
+			continue
+		}
+		// Dialogue: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+		colonIdx := strings.Index(line, ":")
+		if colonIdx < 0 {
+			continue
+		}
+		content := strings.TrimSpace(line[colonIdx+1:])
+		parts := strings.SplitN(content, ",", 10)
+		if len(parts) < 10 {
+			continue
+		}
+		start := formatASSTimeToSRT(parts[1])
+		end := formatASSTimeToSRT(parts[2])
+		text := stripASSTags(parts[9])
+		if text == "" {
+			continue
+		}
+
+		fmt.Fprintf(&srtBuf, "%d\n%s --> %s\n%s\n\n", idx, start, end, text)
+		idx++
+	}
+
+	if srtBuf.Len() == 0 {
+		return nil
+	}
+	return []byte(srtBuf.String())
+}
+
+// formatASSTimeToSRT 将 ASS 时间 "0:01:20.12" 格式化为 SRT 时间 "00:01:20,120"
+func formatASSTimeToSRT(t string) string {
+	t = strings.TrimSpace(t)
+	parts := strings.Split(t, ":")
+	if len(parts) != 3 {
+		return "00:00:00,000"
+	}
+	h, errH := strconv.Atoi(parts[0])
+	m, errM := strconv.Atoi(parts[1])
+	secParts := strings.Split(parts[2], ".")
+	s, errS := strconv.Atoi(secParts[0])
+	ms := 0
+	if len(secParts) > 1 {
+		frac := secParts[1]
+		if len(frac) == 1 {
+			v, _ := strconv.Atoi(frac)
+			ms = v * 100
+		} else if len(frac) == 2 {
+			v, _ := strconv.Atoi(frac)
+			ms = v * 10
+		} else if len(frac) >= 3 {
+			ms, _ = strconv.Atoi(frac[:3])
+		}
+	}
+	if errH != nil || errM != nil || errS != nil {
+		return "00:00:00,000"
+	}
+	return fmt.Sprintf("%02d:%02d:%02d,%03d", h, m, s, ms)
+}
+
+// stripASSTags 去除 ASS 格式样式标签（如 {\pos(100,200)}），并替换换行符
+func stripASSTags(text string) string {
+	var b strings.Builder
+	inTag := false
+	for _, r := range text {
+		if r == '{' {
+			inTag = true
+			continue
+		}
+		if r == '}' {
+			inTag = false
+			continue
+		}
+		if !inTag {
+			b.WriteRune(r)
+		}
+	}
+	s := b.String()
+	s = strings.ReplaceAll(s, `\N`, "\n")
+	s = strings.ReplaceAll(s, `\n`, "\n")
+	s = strings.ReplaceAll(s, `\h`, " ")
+	return strings.TrimSpace(s)
 }

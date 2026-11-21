@@ -638,6 +638,47 @@ func (a *App) SetVolume(volume int) error {
 	return renderer.SetVolume(ctx, volume)
 }
 
+// GetMute 获取电视端静音状态。
+func (a *App) GetMute() (bool, error) {
+	renderer, err := a.currentRenderer()
+	if err != nil {
+		return false, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), controlTimeout)
+	defer cancel()
+	return renderer.GetMute(ctx)
+}
+
+// SetMute 设置电视端静音状态。
+func (a *App) SetMute(mute bool) error {
+	renderer, err := a.currentRenderer()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), controlTimeout)
+	defer cancel()
+	return renderer.SetMute(ctx, mute)
+}
+
+// ToggleMute 切换电视端静音状态并返回新状态。
+func (a *App) ToggleMute() (bool, error) {
+	renderer, err := a.currentRenderer()
+	if err != nil {
+		return false, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), controlTimeout)
+	defer cancel()
+	muted, err := renderer.GetMute(ctx)
+	if err != nil {
+		return false, err
+	}
+	next := !muted
+	if err := renderer.SetMute(ctx, next); err != nil {
+		return false, err
+	}
+	return next, nil
+}
+
 // GetCastStatus 返回当前投屏状态快照。
 func (a *App) GetCastStatus() *CastStatus {
 	a.mu.Lock()
