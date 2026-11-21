@@ -1,8 +1,24 @@
 # 发布流程（RELEASE）
 
-本文档描述 AnyDLNA macOS 版的**手动发布流程**：版本号约定 → 构建 → Developer ID 签名 → 公证 → 校验。目前发布全在本机手动完成，CI（`.github/workflows/ci.yml`）只负责测试与交叉编译校验，不做构建产物与分发。
+发布有两条路径，按用途选择：
 
-> 本机自用直接跑 `./scripts/build-app.sh` 即可（adhoc 签名，拷给他人会被 Gatekeeper 拦截）；本文流程只在**对外分发**时需要，且需要 Apple Developer 账号。发布机需为 arm64 macOS（`bundle-tools.sh` 中的 ffmpeg 静态包仅提供 arm64 构建）。
+| 路径 | 触发 | 签名 | 适用 |
+| --- | --- | --- | --- |
+| **GitHub Release**（默认） | 推送 `v*` tag 或手动触发 workflow | adhoc | 日常发布；产物挂在 GitHub Release 页供下载，**本机可用**，拷给他人会被 Gatekeeper 拦截 |
+| **手动 Developer ID**（本文主体） | 本机手动 | Developer ID + 公证 | 对外分发给他人且希望无 Gatekeeper 拦截；需 Apple Developer 账号 |
+
+两条路径的构建命令相同（`./scripts/build-app.sh`：wails build → 自带工具打包 → 重签）。发布机/runner 需为 arm64 macOS（`bundle-tools.sh` 中的 ffmpeg 静态包仅提供 arm64 构建）。
+
+## GitHub Release（自动）
+
+由 `.github/workflows/release.yml` 实现，macOS arm64 runner 上完成「构建 → 校验版本与 tag 一致 → zip → 创建 Release 并上传产物」：
+
+1. 常规触发：推送 `v*` tag（`git push origin v1.3.0`，tag 纪律见 git-workflow：逐个推、推完确认 CI）。
+2. 补发触发：Actions 页手动运行 Release workflow，填入已有 tag 名（用于「tag 已推、workflow 后加」的历史版本补发，不动 tag 本身）。
+3. Release notes 由 GitHub 按 tag 间的 PR 自动生成（`--generate-notes`）。
+4. 产物命名：`AnyDLNA-<tag>-macos-arm64.zip`（`ditto -c -k --keepParent` 保留 .app 目录结构）。
+
+测试与交叉编译由 CI workflow（`ci.yml`，tag 推送同样触发）在同 commit 上负责，Release workflow 不重复跑。
 
 ## 版本号：wails.json 为单一来源
 
@@ -11,6 +27,7 @@
   1. 把 `productVersion` 更新为目标版本（语义化版本，如 `1.2.0`）并提交；
   2. 代码合并进 main 后，在**同一 commit** 上打 tag：`git tag v1.2.0`；
   3. tag 的 `X.Y.Z` 必须与 `productVersion` 完全一致——两者不一致时，以 `productVersion` 为准修正 tag 或版本号，再进入构建。
+  4. 推送 tag 触发 Release workflow 自动构建并发布 GitHub Release；CI 同 commit 校验（测试 + 三平台交叉编译）必须全绿。
 - tag 之后 `productVersion` 又有新提交的，属于未发布内容，不打 tag、不发布。
 
 ## 发布步骤
