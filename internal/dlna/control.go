@@ -29,7 +29,7 @@ func (r *Renderer) avTransport(ctx context.Context, action string, args [][2]str
 		return fmt.Errorf("设备 %s 不支持 AVTransport", r.dev.FriendlyName)
 	}
 	all := append([][2]string{{"InstanceID", "0"}}, args...)
-	_, err := soapCall(ctx, r.client, svc.ControlURL, AVTransportServiceType, action, all)
+	_, err := soapCall(ctx, r.client, svc.ControlURL, svc.Type, action, all)
 	return err
 }
 
@@ -82,7 +82,7 @@ func (r *Renderer) TransportState(ctx context.Context) (string, error) {
 	if svc == nil {
 		return "", fmt.Errorf("设备 %s 不支持 AVTransport", r.dev.FriendlyName)
 	}
-	out, err := soapCall(ctx, r.client, svc.ControlURL, AVTransportServiceType, "GetTransportInfo", [][2]string{{"InstanceID", "0"}})
+	out, err := soapCall(ctx, r.client, svc.ControlURL, svc.Type, "GetTransportInfo", [][2]string{{"InstanceID", "0"}})
 	if err != nil {
 		return "", err
 	}
@@ -95,7 +95,7 @@ func (r *Renderer) PositionInfo(ctx context.Context) (relTime, duration string, 
 	if svc == nil {
 		return "", "", fmt.Errorf("设备 %s 不支持 AVTransport", r.dev.FriendlyName)
 	}
-	out, err := soapCall(ctx, r.client, svc.ControlURL, AVTransportServiceType, "GetPositionInfo", [][2]string{{"InstanceID", "0"}})
+	out, err := soapCall(ctx, r.client, svc.ControlURL, svc.Type, "GetPositionInfo", [][2]string{{"InstanceID", "0"}})
 	if err != nil {
 		return "", "", err
 	}
@@ -108,7 +108,7 @@ func (r *Renderer) GetVolume(ctx context.Context) (int, error) {
 	if svc == nil {
 		return 0, fmt.Errorf("设备 %s 不支持 RenderingControl", r.dev.FriendlyName)
 	}
-	out, err := soapCall(ctx, r.client, svc.ControlURL, RenderingControlServiceType, "GetVolume", [][2]string{
+	out, err := soapCall(ctx, r.client, svc.ControlURL, svc.Type, "GetVolume", [][2]string{
 		{"InstanceID", "0"},
 		{"Channel", "Master"},
 	})
@@ -134,7 +134,7 @@ func (r *Renderer) SetVolume(ctx context.Context, volume int) error {
 	if volume > 100 {
 		volume = 100
 	}
-	_, err := soapCall(ctx, r.client, svc.ControlURL, RenderingControlServiceType, "SetVolume", [][2]string{
+	_, err := soapCall(ctx, r.client, svc.ControlURL, svc.Type, "SetVolume", [][2]string{
 		{"InstanceID", "0"},
 		{"Channel", "Master"},
 		{"DesiredVolume", strconv.Itoa(volume)},
@@ -148,7 +148,7 @@ func (r *Renderer) GetMute(ctx context.Context) (bool, error) {
 	if svc == nil {
 		return false, fmt.Errorf("设备 %s 不支持 RenderingControl", r.dev.FriendlyName)
 	}
-	out, err := soapCall(ctx, r.client, svc.ControlURL, RenderingControlServiceType, "GetMute", [][2]string{
+	out, err := soapCall(ctx, r.client, svc.ControlURL, svc.Type, "GetMute", [][2]string{
 		{"InstanceID", "0"},
 		{"Channel", "Master"},
 	})
@@ -169,7 +169,7 @@ func (r *Renderer) SetMute(ctx context.Context, mute bool) error {
 	if mute {
 		desired = "1"
 	}
-	_, err := soapCall(ctx, r.client, svc.ControlURL, RenderingControlServiceType, "SetMute", [][2]string{
+	_, err := soapCall(ctx, r.client, svc.ControlURL, svc.Type, "SetMute", [][2]string{
 		{"InstanceID", "0"},
 		{"Channel", "Master"},
 		{"DesiredMute", desired},

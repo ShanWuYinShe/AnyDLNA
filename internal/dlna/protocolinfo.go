@@ -215,7 +215,7 @@ func (r *Renderer) QueryProtocolInfo(ctx context.Context) (ProtocolCapabilities,
 	if svc == nil {
 		return ProtocolCapabilities{}, nil
 	}
-	out, err := soapCall(ctx, r.client, svc.ControlURL, ConnectionManagerServiceType, "GetProtocolInfo", nil)
+	out, err := soapCall(ctx, r.client, svc.ControlURL, svc.Type, "GetProtocolInfo", nil)
 	if err != nil {
 		return ProtocolCapabilities{}, err
 	}

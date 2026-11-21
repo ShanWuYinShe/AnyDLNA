@@ -39,14 +39,15 @@ type App struct {
 	castMu   sync.Mutex // 串行化投屏操作，长耗时步骤不持有 a.mu
 	searchMu sync.Mutex // 串行化主动搜索，长耗时步骤不持有 a.mu
 
-	mu         sync.Mutex
-	cfg        media.Config   // 在线视频代理与 Cookies 配置
-	devices    []*dlna.Device // 已发现的渲染设备（搜索结果 + 被动监听累积）
-	deviceMiss map[string]int // UDN → 连续未应答搜索的轮数（离线判定用）
-	renderer   *dlna.Renderer // 当前投屏目标
-	sessionID  string         // 当前流会话 ID
-	castFile   string
-	castMode   string
+	mu           sync.Mutex
+	cfg          media.Config   // 在线视频代理与 Cookies 配置
+	devices      []*dlna.Device // 已发现的渲染设备（搜索结果 + 被动监听累积）
+	deviceMiss   map[string]int // UDN → 连续未应答搜索的轮数（离线判定用）
+	renderer     *dlna.Renderer // 当前投屏目标
+	sessionID    string         // 当前流会话 ID
+	castFile     string
+	castMode     string
+	castDuration float64
 }
 
 // controlTimeout 是播放控制与音量操作的单次超时；pollTimeout 是进度轮询的

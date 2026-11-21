@@ -586,12 +586,20 @@ func TestIsHighBitDepth(t *testing.T) {
 
 func TestMimeTypeFor(t *testing.T) {
 	cases := map[string]string{
-		"/a/movie.mp4": "video/mp4",
-		"/a/movie.m4v": "video/mp4",
-		"/a/movie.mov": "video/quicktime",
-		"/a/movie.mkv": "video/x-matroska",
-		"/a/movie.ts":  "video/mp2t",
-		"/a/未知.xyz":    "application/octet-stream",
+		"/a/movie.mp4":  "video/mp4",
+		"/a/movie.MP4":  "video/mp4",
+		"/a/movie.m4v":  "video/mp4",
+		"/a/movie.mov":  "video/quicktime",
+		"/a/movie.mkv":  "video/x-matroska",
+		"/a/movie.MKV":  "video/x-matroska",
+		"/a/movie.ts":   "video/mp2t",
+		"/a/clip.flv":   "video/x-flv",
+		"/a/sample.wmv": "video/x-ms-wmv",
+		"/a/disc.vob":   "video/mpeg",
+		"/a/music.flac": "audio/flac",
+		"/a/song.MP3":   "audio/mpeg",
+		"/a/voice.wav":  "audio/wav",
+		"/a/未知.xyz":     "application/octet-stream",
 	}
 	for path, want := range cases {
 		if got := MimeTypeFor(path); got != want {

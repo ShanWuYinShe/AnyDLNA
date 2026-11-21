@@ -253,3 +253,47 @@ func TestResolveReferenceVariants(t *testing.T) {
 		})
 	}
 }
+
+// TestDescribeUPnPV2Service 验证支持 AVTransport:2 等现代 UPnP v2 服务的设备识别与兼容。
+func TestDescribeUPnPV2Service(t *testing.T) {
+	descV2 := `<?xml version="1.0" encoding="UTF-8"?>
+<root xmlns="urn:schemas-upnp-org:device-1-0">
+  <device>
+    <deviceType>urn:schemas-upnp-org:device:MediaRenderer:2</deviceType>
+    <friendlyName>现代智能电视</friendlyName>
+    <UDN>uuid:tv-v2-test</UDN>
+    <serviceList>
+      <service>
+        <serviceType>urn:schemas-upnp-org:service:AVTransport:2</serviceType>
+        <serviceId>urn:upnp-org:serviceId:AVTransport</serviceId>
+        <controlURL>/ctrl-v2</controlURL>
+      </service>
+      <service>
+        <serviceType>urn:schemas-upnp-org:service:RenderingControl:2</serviceType>
+        <serviceId>urn:upnp-org:serviceId:RenderingControl</serviceId>
+        <controlURL>/rc-v2</controlURL>
+      </service>
+    </serviceList>
+  </device>
+</root>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/xml")
+		_, _ = w.Write([]byte(descV2))
+	}))
+	defer srv.Close()
+
+	dev, err := Describe(t.Context(), srv.Client(), srv.URL)
+	if err != nil {
+		t.Fatalf("Describe 失败: %v", err)
+	}
+	if !dev.HasAVTransport() {
+		t.Fatal("应当识别支持 AVTransport:2 的渲染设备")
+	}
+	svc := dev.Service(AVTransportServiceType)
+	if svc == nil {
+		t.Fatal("应当通过兼容前缀匹配取到 AVTransport 服务")
+	}
+	if svc.Type != "urn:schemas-upnp-org:service:AVTransport:2" {
+		t.Errorf("服务的实际 Type = %q, 期望 AVTransport:2", svc.Type)
+	}
+}

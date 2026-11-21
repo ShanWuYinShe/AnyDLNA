@@ -123,3 +123,31 @@ func (t *Transcoder) liveStreams() int {
 	defer t.mu.Unlock()
 	return len(t.streams)
 }
+
+func TestCodecArgsAudioTrack(t *testing.T) {
+	// 默认音频轨（0）
+	args0 := codecArgs(Plan{}, 0)
+	found0 := false
+	for i, arg := range args0 {
+		if arg == "-map" && i+1 < len(args0) && args0[i+1] == "0:a:0?" {
+			found0 = true
+			break
+		}
+	}
+	if !found0 {
+		t.Errorf("默认 Plan 应映射 0:a:0?，参数: %v", args0)
+	}
+
+	// 指定音轨（1）
+	args1 := codecArgs(Plan{AudioTrackIndex: 1}, 0)
+	found1 := false
+	for i, arg := range args1 {
+		if arg == "-map" && i+1 < len(args1) && args1[i+1] == "0:a:1?" {
+			found1 = true
+			break
+		}
+	}
+	if !found1 {
+		t.Errorf("指定 AudioTrackIndex=1 应映射 0:a:1?，参数: %v", args1)
+	}
+}

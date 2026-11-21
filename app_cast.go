@@ -373,6 +373,7 @@ func (a *App) startCast(dev *dlna.Device, srv *media.StreamServer, sessionID, ti
 	a.sessionID = sessionID
 	a.castFile = title
 	a.castMode = mode
+	a.castDuration = durationSec
 	a.mu.Unlock()
 
 	a.saveCastState(dev.UDN, dev.Location, title, mode)
@@ -390,6 +391,7 @@ func (a *App) stopCast() {
 	a.sessionID = ""
 	a.castFile = ""
 	a.castMode = ""
+	a.castDuration = 0
 	a.mu.Unlock()
 
 	if sessionID != "" && srv != nil {
@@ -613,6 +615,12 @@ func (a *App) Poll() (*Position, error) {
 		if v, perr := dlna.ParseClock(duration); perr == nil {
 			pos.DurationSec = v
 		}
+	}
+	// 电视端未上报总时长或上报为 0 时，使用投屏时探测记录的真实时长兜底
+	if pos.DurationSec <= 0 {
+		a.mu.Lock()
+		pos.DurationSec = a.castDuration
+		a.mu.Unlock()
 	}
 	return pos, nil
 }

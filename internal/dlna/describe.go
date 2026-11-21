@@ -100,10 +100,10 @@ func collectDevice(node *descDevice, base *url.URL, dev *Device) {
 	}
 }
 
-// isKnownServiceType 报告服务类型是否为本应用需要的服务。
+// isKnownServiceType 报告服务类型是否为本应用需要的服务（支持 v1/v2/v3 版本前缀匹配）。
 func isKnownServiceType(serviceType string) bool {
-	for _, known := range knownServiceTypes {
-		if serviceType == known {
+	for _, prefix := range knownServicePrefixes {
+		if strings.HasPrefix(serviceType, prefix) {
 			return true
 		}
 	}

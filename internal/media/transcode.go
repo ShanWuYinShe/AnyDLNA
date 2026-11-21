@@ -804,7 +804,11 @@ func outputArgs(plan Plan, audioInput int) []string {
 // ffmpeg 会忽略输出文件名之后出现的全部选项——摄像头直播的 GOP/CBR 等
 // 额外编码参数必须插在它之前才能生效（实测被忽略过，见 cameraOutputArgs）。
 func codecArgs(plan Plan, audioInput int) []string {
-	args := []string{"-map", "0:v:0", "-map", strconv.Itoa(audioInput) + ":a:0?", "-sn", "-dn"}
+	audioTrack := 0
+	if plan.AudioTrackIndex > 0 {
+		audioTrack = plan.AudioTrackIndex
+	}
+	args := []string{"-map", "0:v:0", "-map", fmt.Sprintf("%d:a:%d?", audioInput, audioTrack), "-sn", "-dn"}
 
 	if plan.CopyVideo {
 		args = append(args, "-c:v", "copy")
