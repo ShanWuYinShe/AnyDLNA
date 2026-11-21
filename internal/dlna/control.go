@@ -34,11 +34,22 @@ func (r *Renderer) avTransport(ctx context.Context, action string, args [][2]str
 }
 
 // SetAVTransportURI 设置待播放的媒体 URI 及其元数据。
+// 当设备因固件或内置精简 XML 解析器缺陷拒绝复杂 DIDL-Lite 元数据（如 402/501/704/714）时，
+// 自动以空元数据降级重试一次，大幅提升老旧或非标 UPnP 电视盒子的起播成功率。
 func (r *Renderer) SetAVTransportURI(ctx context.Context, uri, metadata string) error {
-	return r.avTransport(ctx, "SetAVTransportURI", [][2]string{
+	err := r.avTransport(ctx, "SetAVTransportURI", [][2]string{
 		{"CurrentURI", uri},
 		{"CurrentURIMetaData", metadata},
 	})
+	if err != nil && metadata != "" {
+		if retryErr := r.avTransport(ctx, "SetAVTransportURI", [][2]string{
+			{"CurrentURI", uri},
+			{"CurrentURIMetaData", ""},
+		}); retryErr == nil {
+			return nil
+		}
+	}
+	return err
 }
 
 // Play 开始播放。

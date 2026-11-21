@@ -315,7 +315,7 @@ func (a *App) CastURL(udn, rawURL, titleOverride string) (*CastStatus, error) {
 	return status, nil
 }
 
-// playWithRetry 尝试调用 Play，遇到 TV 状态机转换中锁定时（如 UPnP 705 / 501 / Transition）
+// playWithRetry 尝试调用 Play，遇到 TV 状态机转换中锁定时（如 UPnP 705 / 701 / 501 / Transition）
 // 进行有限次退避重试，避免下发后立即 Play 导致的偶发启动失败。
 func playWithRetry(ctx context.Context, renderer *dlna.Renderer, maxAttempts int, delay time.Duration) error {
 	var lastErr error
@@ -334,9 +334,11 @@ func playWithRetry(ctx context.Context, renderer *dlna.Renderer, maxAttempts int
 		lastErr = err
 		errStr := err.Error()
 		isTransient := strings.Contains(errStr, "705") ||
+			strings.Contains(errStr, "701") ||
 			strings.Contains(errStr, "501") ||
 			strings.Contains(errStr, "locked") ||
-			strings.Contains(errStr, "Transition")
+			strings.Contains(errStr, "Transition") ||
+			strings.Contains(errStr, "Resource")
 		if !isTransient {
 			return err
 		}

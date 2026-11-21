@@ -204,3 +204,58 @@ func TestRendererMute(t *testing.T) {
 		t.Errorf("设置后期望为静音，实际为非静音")
 	}
 }
+
+// TestSetAVTransportURIFallbackEmptyMetadata 验证当设备拒绝复杂元数据时能自动以空元数据降级重试并成功。
+func TestSetAVTransportURIFallbackEmptyMetadata(t *testing.T) {
+	var attempts int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		body, _ := io.ReadAll(r.Body)
+		// 如果 CurrentURIMetaData 含有非空 DIDL，模拟老设备报错 501 Action Failed
+		if strings.Contains(string(body), "DIDL-Lite") {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`<?xml version="1.0"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Body>
+    <s:Fault>
+      <faultcode>s:Client</faultcode>
+      <faultstring>UPnPError</faultstring>
+      <detail>
+        <UPnPError xmlns="urn:schemas-upnp-org:control-1-0">
+          <errorCode>501</errorCode>
+          <errorDescription>Action Failed</errorDescription>
+        </UPnPError>
+      </detail>
+    </s:Fault>
+  </s:Body>
+</s:Envelope>`))
+			return
+		}
+		// 空元数据下发成功
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`<?xml version="1.0"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Body>
+    <u:SetAVTransportURIResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"/>
+  </s:Body>
+</s:Envelope>`))
+	}))
+	defer ts.Close()
+
+	dev := &Device{
+		FriendlyName: "LegacyTV",
+		Services: []Service{
+			{Type: AVTransportServiceType, ControlURL: ts.URL},
+		},
+	}
+	renderer := NewRenderer(dev)
+	ctx := context.Background()
+
+	err := renderer.SetAVTransportURI(ctx, "http://192.168.1.10:8080/f/test.mp4", "<DIDL-Lite>...</DIDL-Lite>")
+	if err != nil {
+		t.Fatalf("SetAVTransportURI 降级重试期望成功，实际失败: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("期望发生 2 次尝试（首次失败后空元数据重试），实际尝试了 %d 次", attempts)
+	}
+}
