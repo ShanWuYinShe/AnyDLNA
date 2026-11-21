@@ -265,6 +265,9 @@ func (t *Transcoder) StreamTo(w io.Writer) (cancel func(), done <-chan struct{},
 
 	if t.srcURL == "" {
 		// 本地文件源：ffmpeg 直接读取，支持输入级快速定位。
+		if !t.plan.CopyVideo {
+			args = append(args, HwaccelDecoderArgs()...)
+		}
 		if ssSec > 0 {
 			args = append(args, "-ss", strconv.FormatFloat(ssSec, 'f', 2, 64))
 		}
@@ -299,6 +302,9 @@ func (t *Transcoder) StreamTo(w io.Writer) (cancel func(), done <-chan struct{},
 			killProcGroup(videoCmd)
 			_, _ = videoCmd.Process.Wait()
 			return func() {}, nil, fmt.Errorf("启动音频拉流失败: %w", startErr)
+		}
+		if !t.plan.CopyVideo {
+			args = append(args, HwaccelDecoderArgs()...)
 		}
 		args = append(args, "-i", "pipe:0", "-i", "pipe:3")
 		cmd := toolCmd("ffmpeg", append(args, outputArgs(t.plan, 1)...)...)
@@ -338,6 +344,9 @@ func (t *Transcoder) StreamTo(w io.Writer) (cancel func(), done <-chan struct{},
 				}
 				// 网络抖动自动重连，防止直播瞬时卡顿导致流进程退出
 				args = append(args, "-reconnect", "1", "-reconnect_at_eof", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5")
+				if !t.plan.CopyVideo {
+					args = append(args, HwaccelDecoderArgs()...)
+				}
 				// 携带防盗链必需的请求头（Referer/UA/Origin 等）
 				if i < len(t.cachedHeaders) && len(t.cachedHeaders[i]) > 0 {
 					var hsb strings.Builder
@@ -363,15 +372,18 @@ func (t *Transcoder) StreamTo(w io.Writer) (cancel func(), done <-chan struct{},
 		if ssSec > 0 && !t.isLive {
 			ss = strconv.FormatFloat(ssSec, 'f', 2, 64)
 		}
+		// 用**实际在用**的流重算输出方案：候选可能因节点不可达而换成
+		// 别的分辨率/编码，沿用投屏时的 plan 会导致直通设备解不了的编码。
+		plan := t.effectivePlanLocked()
 		for _, u := range inputs {
 			if ss != "" {
 				args = append(args, "-ss", ss)
 			}
+			if !plan.CopyVideo {
+				args = append(args, HwaccelDecoderArgs()...)
+			}
 			args = append(args, "-i", u)
 		}
-		// 用**实际在用**的流重算输出方案：候选可能因节点不可达而换成
-		// 别的分辨率/编码，沿用投屏时的 plan 会导致直通设备解不了的编码。
-		plan := t.effectivePlanLocked()
 		cmd := toolCmd("ffmpeg", append(args, outputArgs(plan, audioIdx)...)...)
 		setProcGroup(cmd)
 		return t.launchLocked(cmd, nil, nil, w, stderr)
@@ -826,52 +838,18 @@ func codecArgs(plan Plan, audioInput int) []string {
 }
 
 // selectVideoEncoderArgs 优先选用平台硬件加速编码器，未提供时平滑回退到 libx264 软编。
-// 设置 -g 60 确保每 2 秒至少一个关键帧，电视端起播与跳转（Seek）后无需长时间等待 IDR 帧即可解码画面。
+// 委托给跨平台硬件加速选择器 GetVideoEncoderArgs。
 func selectVideoEncoderArgs() []string {
-	if runtime.GOOS == "darwin" && hasVideoToolbox() {
-		return []string{
-			"-c:v", "h264_videotoolbox",
-			"-b:v", "6M", "-maxrate", "10M", "-bufsize", "12M",
-			"-g", "60",
-			"-pix_fmt", "yuv420p",
-		}
-	}
-	return []string{
-		"-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-		"-maxrate", "4M", "-bufsize", "8M",
-		"-g", "60",
-		"-pix_fmt", "yuv420p",
-	}
+	return GetVideoEncoderArgs()
 }
-
-var (
-	vtOnce  sync.Once
-	vtAvail bool
-)
 
 // hasVideoToolbox 检测本机 ffmpeg 是否支持 Apple VideoToolbox 硬件加速。
 func hasVideoToolbox() bool {
 	if runtime.GOOS != "darwin" {
 		return false
 	}
-	vtOnce.Do(func() {
-		ffmpegPath, ok := ResolveTool("ffmpeg")
-		if !ok {
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-loglevel", "error",
-			"-f", "lavfi", "-i", "nullsrc=s=64x64:d=0.04",
-			"-c:v", "h264_videotoolbox", "-f", "null", "-")
-		if err := cmd.Run(); err == nil {
-			vtAvail = true
-			Diagf("启用硬件加速转码: h264_videotoolbox")
-		} else {
-			Diagf("硬件加速自检未通过，使用软解软编: %v", err)
-		}
-	})
-	return vtAvail
+	enc := SelectVideoEncoder("darwin")
+	return enc != nil && enc.Name == "h264_videotoolbox"
 }
 
 // containerArgs 返回目标容器的封装参数。

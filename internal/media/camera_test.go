@@ -83,6 +83,67 @@ func containsAll(args, want []string) bool {
 	return true
 }
 
+// sampleDShowOutput 是 Windows ffmpeg -list_devices 的典型 DirectShow 输出。
+const sampleDShowOutput = "[dshow @ 000001a2b3c4d5e0] DirectShow video devices (some may be both video and audio devices)\n" +
+	"[dshow @ 000001a2b3c4d5e0]  \"Integrated Camera\"\n" +
+	"[dshow @ 000001a2b3c4d5e0]     Alternative name \"@device_pnp_\\\\?\\usb#vid_04f2&pid_b604&mi_00#6&1f5fae8&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\\global\"\n" +
+	"[dshow @ 000001a2b3c4d5e0]  \"screen-capture-recorder\"\n" +
+	"[dshow @ 000001a2b3c4d5e0]     Alternative name \"@device_sw_{860BB310-5D01-11D0-BD3B-00A0C911CE86}\\{4EA69302-2C8A-11D0-93D4-00A0C90DCAA9}\"\n" +
+	"[dshow @ 000001a2b3c4d5e0] DirectShow audio devices\n" +
+	"[dshow @ 000001a2b3c4d5e0]  \"Microphone (Realtek Audio)\"\n" +
+	"[dshow @ 000001a2b3c4d5e0]     Alternative name \"@device_cm_{33d9a762-90c8-11d0-bd43-00a0c911ce86}\\wave_{A2D4055E-4B02-4A73-A33B-E693B143F4D2}\"\n"
+
+func TestParseDShowDevices(t *testing.T) {
+	devs := parseDShowDevices(sampleDShowOutput)
+	if len(devs) != 3 {
+		t.Fatalf("预期解析出 3 个设备，实际得到 %d: %+v", len(devs), devs)
+	}
+
+	want := []struct {
+		kind   string
+		index  string
+		name   string
+		screen bool
+	}{
+		{"video", "Integrated Camera", "Integrated Camera", false},
+		{"video", "screen-capture-recorder", "screen-capture-recorder", true},
+		{"audio", "Microphone (Realtek Audio)", "Microphone (Realtek Audio)", false},
+	}
+
+	for i, w := range want {
+		d := devs[i]
+		if d.Kind != w.kind || d.Index != w.index || d.Name != w.name || d.Screen != w.screen {
+			t.Errorf("第 %d 项设备不匹配: got %+v, want %+v", i, d, w)
+		}
+	}
+}
+
+func TestCameraInputArgsCrossPlatform(t *testing.T) {
+	// Windows 屏幕采集
+	winScr := cameraInputArgsForOS(&CameraSource{VideoDevice: "desktop", Screen: true}, "windows")
+	if !containsAll(winScr, []string{"-f", "gdigrab", "-i", "desktop", "-draw_mouse", "1"}) {
+		t.Errorf("Windows 屏幕采集参数异常: %v", winScr)
+	}
+
+	// Windows 摄像头 + 麦克风
+	winCam := cameraInputArgsForOS(&CameraSource{VideoDevice: "Integrated Camera", AudioDevice: "Microphone (Realtek Audio)"}, "windows")
+	if !containsAll(winCam, []string{"-f", "dshow", "-video_size", "1280x720", "-i", "video=Integrated Camera:audio=Microphone (Realtek Audio)"}) {
+		t.Errorf("Windows 摄像头采集参数异常: %v", winCam)
+	}
+
+	// Linux 屏幕采集
+	linuxScr := cameraInputArgsForOS(&CameraSource{VideoDevice: ":0.0", Screen: true}, "linux")
+	if !containsAll(linuxScr, []string{"-f", "x11grab", "-i", ":0.0", "-draw_mouse", "1"}) {
+		t.Errorf("Linux 屏幕采集参数异常: %v", linuxScr)
+	}
+
+	// Linux 摄像头
+	linuxCam := cameraInputArgsForOS(&CameraSource{VideoDevice: "/dev/video0"}, "linux")
+	if !containsAll(linuxCam, []string{"-f", "v4l2", "-video_size", "1280x720", "-i", "/dev/video0"}) {
+		t.Errorf("Linux 摄像头采集参数异常: %v", linuxCam)
+	}
+}
+
 // TestParseAVFoundationDevicesEmpty 无 avfoundation 输出（如 ffmpeg 缺失
 // 报错文本）时应返回空列表而不是误报设备。
 func TestParseAVFoundationDevicesEmpty(t *testing.T) {
