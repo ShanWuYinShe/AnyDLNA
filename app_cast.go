@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,6 +94,9 @@ func (a *App) PickVideo(udn string) (*PickedVideo, error) {
 	subName := ""
 	if info.SubtitlePath != "" {
 		subName = filepath.Base(info.SubtitlePath)
+		if strings.Contains(info.SubtitlePath, "anydlna_embedded_subs") {
+			subName = "内嵌字幕"
+		}
 	}
 	return &PickedVideo{
 		Path:         path,
@@ -152,7 +156,7 @@ func (a *App) Cast(udn, path, titleOverride string) (*CastStatus, error) {
 		sessionID = srv.AddTranscodeWithSubtitle(path, title, plan, info.SubtitlePath)
 		mime, mode = plan.OutputMIME(), string(plan.Mode)
 	}
-	ip, err := netutil.LANIP()
+	ip, err := a.lanIPForDevice(dev)
 	if err != nil {
 		srv.Remove(sessionID)
 		return nil, fmt.Errorf("获取本机局网地址失败: %w", err)
@@ -222,6 +226,19 @@ func (a *App) effectiveCastTitle(defaultTitle, override string) string {
 	return a.castDisplayTitle(defaultTitle)
 }
 
+// lanIPForDevice 返回针对特定设备的最优本机局域网 IP。
+// 优先针对目标设备所在子网探测路由（避免 VPN/TUN 或多网卡将流量引向虚拟网卡）。
+func (a *App) lanIPForDevice(dev *dlna.Device) (string, error) {
+	if dev != nil && dev.Location != "" {
+		if u, err := url.Parse(dev.Location); err == nil && u.Hostname() != "" {
+			if ip, err := netutil.LANIPFor(u.Hostname()); err == nil && ip != "" {
+				return ip, nil
+			}
+		}
+	}
+	return netutil.LANIP()
+}
+
 // castTarget 取出投屏目标设备与流服务，校验可用性。
 func (a *App) castTarget(udn string) (*dlna.Device, *media.StreamServer, error) {
 	a.mu.Lock()
@@ -283,7 +300,7 @@ func (a *App) CastURL(udn, rawURL, titleOverride string) (*CastStatus, error) {
 		media.Diagf("投屏失败 预热 会话=%s err=%v", sessionID, err)
 		return nil, err
 	}
-	ip, err := netutil.LANIP()
+	ip, err := a.lanIPForDevice(dev)
 	if err != nil {
 		srv.Remove(sessionID)
 		return nil, fmt.Errorf("获取本机局域网地址失败: %w", err)
@@ -537,7 +554,7 @@ func (a *App) SeekTo(sec float64) error {
 	if err := srv.SetTranscodeOffset(sessionID, sec); err != nil {
 		return err
 	}
-	playURL := rebuildURL(srv, sessionID, sec)
+	playURL := a.rebuildURL(srv, renderer.Device(), sessionID, sec)
 	if playURL == "" {
 		return errors.New("获取本机局域网地址失败")
 	}
@@ -559,8 +576,8 @@ func (a *App) SeekTo(sec float64) error {
 }
 
 // rebuildURL 重建当前会话的拉流 URL，附加 t 参数促使电视端视作新资源。
-func rebuildURL(srv *media.StreamServer, sessionID string, sec float64) string {
-	ip, err := netutil.LANIP()
+func (a *App) rebuildURL(srv *media.StreamServer, dev *dlna.Device, sessionID string, sec float64) string {
+	ip, err := a.lanIPForDevice(dev)
 	if err != nil {
 		return ""
 	}

@@ -2,7 +2,6 @@ package main
 
 import (
 	"AnyDLNA/internal/media"
-	"AnyDLNA/internal/netutil"
 	"context"
 	"fmt"
 	"time"
@@ -55,7 +54,7 @@ func (a *App) CastCamera(udn, videoDevice, audioDevice string, screen bool, titl
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	ip, err := netutil.LANIP()
+	ip, err := a.lanIPForDevice(dev)
 	if err != nil {
 		srv.Remove(sessionID)
 		return nil, fmt.Errorf("获取本机局域网地址失败: %w", err)

@@ -53,3 +53,23 @@ func TestFindExternalSubtitle(t *testing.T) {
 		t.Errorf("期望匹配子目录字幕 %q，实际得到 %q", subInDir, got)
 	}
 }
+
+func TestExtractEmbeddedSubtitle(t *testing.T) {
+	ctx := t.Context()
+	// 1. 空路径应返回错误
+	if _, err := ExtractEmbeddedSubtitle(ctx, ""); err == nil {
+		t.Error("空路径应返回错误")
+	}
+
+	// 2. 不存在的文件应返回错误
+	if _, err := ExtractEmbeddedSubtitle(ctx, "/path/to/non_existent.mkv"); err == nil {
+		t.Error("不存在的文件应返回错误")
+	}
+
+	// 3. 无字幕流的空文件/伪文件应返回错误
+	tmp := filepath.Join(t.TempDir(), "dummy.mp4")
+	_ = os.WriteFile(tmp, []byte("not-a-valid-video"), 0o644)
+	if _, err := ExtractEmbeddedSubtitle(ctx, tmp); err == nil {
+		t.Error("无字幕流的文件应返回错误")
+	}
+}

@@ -211,13 +211,19 @@ func (s *StreamServer) serveDirect(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 
+	var modTime time.Time
+	if fi, err := f.Stat(); err == nil {
+		modTime = fi.ModTime()
+	}
+
 	// DLNA 规范头：通知设备当前为流式传输，且原文件支持 HTTP 范围请求与拖动（DLNA.ORG_OP=01）
 	w.Header().Set("transferMode.dlna.org", "Streaming")
 	w.Header().Set("contentFeatures.dlna.org", "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000")
 	w.Header().Set("RealTimeInfo.dlna.org", "DLNA.ORG_TLR=-1")
 
 	// ServeContent 自带 Range/If-Range 处理，电视端拖动进度条即可按需取段。
-	http.ServeContent(w, r, filepath.Base(sess.path), time.Now(), f)
+	// 使用文件真实修改时间而非 time.Now()，避免 If-Range 校验失效导致回退为 200 全量发送。
+	http.ServeContent(w, r, filepath.Base(sess.path), modTime, f)
 }
 
 func (s *StreamServer) serveTranscode(w http.ResponseWriter, r *http.Request) {
