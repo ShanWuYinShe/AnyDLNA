@@ -1,0 +1,84 @@
+# 发布流程：tag 推送（v*）或手动触发时，在 macOS arm64 runner 上构建
+# AnyDLNA.app（wails build + 自带工具打包 + adhoc 重签），zip 后创建 GitHub
+# Release 并附产物。测试与交叉编译由 CI workflow（ci.yml）在同 commit 上
+# 负责，这里只做构建与分发，不重复跑测试。
+#
+# 触发方式：
+#   - 推送新 tag：git push origin vX.Y.Z（tag 纪律见 RELEASE.md）
+#   - 手动触发：对已存在的 tag 补建 Release（workflow_dispatch，填 tag 名），
+#     用于「tag 已推但 workflow 后加」的历史版本补发，不动 tag 本身。
+#
+# 签名说明：runner 无 Developer ID 证书，产物为 adhoc 签名——本机可用，
+# 拷给他人会被 Gatekeeper 拦截。对外分发仍按 RELEASE.md 手动签名+公证。
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要构建并发布 Release 的已有 tag（如 v1.3.0）'
+        required: true
+        type: string
+
+# 创建 Release 需要写 contents 权限。
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # 必须是 arm64 runner：bundle-tools.sh 的 ffmpeg 静态包仅提供 arm64
+    # 构建，脚本开头会校验 uname -m。
+    runs-on: macos-15
+    steps:
+      - name: 检出代码（手动触发时检出指定 tag）
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: 安装 Go（版本取自 go.mod）
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 安装 wails CLI（与 go.mod 中 wails/v2 同版本）
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.15.0
+
+      - name: 构建（wails build → 自带工具打包 → adhoc 重签）
+        run: ./scripts/build-app.sh
+
+      - name: 校验产物版本与 tag 一致
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          VER="${TAG#v}"
+          PLIST_VER="$(defaults read "$PWD/build/bin/AnyDLNA.app/Contents/Info.plist" CFBundleShortVersionString)"
+          echo "tag=$TAG 版本=$VER Info.plist=$PLIST_VER"
+          if [ "$PLIST_VER" != "$VER" ]; then
+            echo "::error::版本不一致：Info.plist=$PLIST_VER，tag=$TAG"
+            exit 1
+          fi
+
+      - name: 打包 zip（保留 .app 目录结构，Gatekeeper/分发要求）
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          ditto -c -k --keepParent build/bin/AnyDLNA.app "AnyDLNA-${TAG}-macos-arm64.zip"
+          ls -lh AnyDLNA-*.zip
+
+      - name: 创建 Release 并上传产物
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          gh release create "$TAG" \
+            --title "AnyDLNA $TAG" \
+            --generate-notes \
+            AnyDLNA-${TAG}-macos-arm64.zip
+          gh release view "$TAG" --json assets,url --jq '{url, assets: [.assets[].name]}'
