@@ -43,3 +43,29 @@ func TestLANIP(t *testing.T) {
 		}
 	}
 }
+
+// TestLANIPFor 校验针对目标地址选择 IP 的逻辑。
+func TestLANIPFor(t *testing.T) {
+	defaultIP, err := LANIP()
+	if err != nil {
+		t.Skip("无可用网络，跳过")
+	}
+
+	// 空主机应回退默认 LANIP
+	ipEmpty, err := LANIPFor("")
+	if err != nil || ipEmpty != defaultIP {
+		t.Errorf("LANIPFor(\"\") = %q, err = %v; 期望 %q", ipEmpty, err, defaultIP)
+	}
+
+	// 拨 8.8.8.8 也应得到合法非回环 IP
+	ipPublic, err := LANIPFor("8.8.8.8:8080")
+	if err != nil || ipPublic == "" {
+		t.Errorf("LANIPFor(\"8.8.8.8:8080\") 失败: %v", err)
+	}
+
+	// 回环地址应被检测并回退为默认局域网 IP
+	ipLoopback, err := LANIPFor("127.0.0.1")
+	if err != nil || ipLoopback != defaultIP {
+		t.Errorf("LANIPFor(\"127.0.0.1\") = %q; 期望回退到默认 %q", ipLoopback, defaultIP)
+	}
+}

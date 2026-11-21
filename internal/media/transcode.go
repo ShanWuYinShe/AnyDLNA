@@ -822,17 +822,21 @@ func codecArgs(plan Plan, audioInput int) []string {
 }
 
 // selectVideoEncoderArgs 优先选用平台硬件加速编码器，未提供时平滑回退到 libx264 软编。
+// 设置 -g 60 确保每 2 秒至少一个关键帧，电视端起播与跳转（Seek）后无需长时间等待 IDR 帧即可解码画面。
 func selectVideoEncoderArgs() []string {
 	if runtime.GOOS == "darwin" && hasVideoToolbox() {
 		return []string{
 			"-c:v", "h264_videotoolbox",
 			"-b:v", "6M", "-maxrate", "10M", "-bufsize", "12M",
+			"-g", "60",
 			"-pix_fmt", "yuv420p",
 		}
 	}
 	return []string{
 		"-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-		"-maxrate", "4M", "-bufsize", "8M", "-pix_fmt", "yuv420p",
+		"-maxrate", "4M", "-bufsize", "8M",
+		"-g", "60",
+		"-pix_fmt", "yuv420p",
 	}
 }
 

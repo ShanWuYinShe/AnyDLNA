@@ -45,8 +45,20 @@ func HasFFmpeg() bool {
 // Probe 用 Go 原生解析探测本地媒体文件（MP4/MOV 与 MKV/WebM），
 // 不再依赖 ffprobe。未知容器返回无编码的保守结果（调用方判为转码），
 // 文件不可读才返回错误。
-func Probe(_ context.Context, path string) (*Info, error) {
-	return goProbeFile(path)
+// 若未找到外挂字幕且 ffmpeg 可用，尝试提取内嵌文本字幕。
+func Probe(ctx context.Context, path string) (*Info, error) {
+	info, err := goProbeFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.SubtitlePath == "" && HasFFmpeg() {
+		subCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		if sub, err := ExtractEmbeddedSubtitle(subCtx, path); err == nil && sub != "" {
+			info.SubtitlePath = sub
+		}
+		cancel()
+	}
+	return info, nil
 }
 
 // probeCacheTTL 是探测结果缓存的存活时间：覆盖「选择视频 → 点投屏」的

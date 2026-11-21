@@ -163,3 +163,52 @@ func TestStreamServerSubtitle(t *testing.T) {
 		t.Errorf("字幕内容不符: %s", body)
 	}
 }
+
+// TestStreamServerIfRange 验证 serveDirect 使用真实 modtime，
+// 确保带 If-Range 头的分段请求能够正确匹配并返回 206 Partial Content。
+func TestStreamServerIfRange(t *testing.T) {
+	srv, err := NewStreamServer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	vidPath := newTestFile(t, []byte("0123456789abcdef"))
+	id := srv.AddDirect(vidPath, "video/mp4", "test")
+	defer srv.Remove(id)
+
+	url := "http://127.0.0.1:" + strconv.Itoa(srv.Port()) + "/f/" + id
+
+	// 1. 先发 HEAD 拿到 Last-Modified
+	headResp, err := http.Head(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headResp.Body.Close()
+	lastMod := headResp.Header.Get("Last-Modified")
+	if lastMod == "" {
+		t.Fatal("未返回 Last-Modified 头")
+	}
+
+	// 2. 带 Range 和 If-Range 请求部分内容
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Range", "bytes=0-3")
+	req.Header.Set("If-Range", lastMod)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusPartialContent {
+		t.Fatalf("带 If-Range 的分段请求应返回 206，实际返回 %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "0123" {
+		t.Errorf("分段内容不符: %q; 期望 %q", string(body), "0123")
+	}
+}

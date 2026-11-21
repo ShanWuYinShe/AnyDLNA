@@ -425,10 +425,10 @@ func TestFormatSelectorForQuality(t *testing.T) {
 	if !strings.Contains(limited, "bv*+ba[acodec^=mp4a][abr<=160]") {
 		t.Errorf("限制不得波及兜底分支: %s", limited)
 	}
-	if QualityMaxHeight("720") != 720 || QualityMaxHeight("") != 0 || QualityMaxHeight("bogus") != 0 {
+	if QualityMaxHeight("2160") != 2160 || QualityMaxHeight("1440") != 1440 || QualityMaxHeight("720") != 720 || QualityMaxHeight("") != 0 || QualityMaxHeight("bogus") != 0 {
 		t.Error("QualityMaxHeight 档位映射错误")
 	}
-	if !ValidQuality("") || !ValidQuality("1080") || ValidQuality("2160") {
+	if !ValidQuality("") || !ValidQuality("2160") || !ValidQuality("1440") || !ValidQuality("1080") || ValidQuality("bogus") {
 		t.Error("ValidQuality 档位校验错误")
 	}
 }

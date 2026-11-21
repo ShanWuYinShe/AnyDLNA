@@ -31,7 +31,9 @@ const (
 const (
 	// QualityBest 不限制分辨率（默认）。
 	QualityBest = "best"
-	// Quality1080 / Quality720 / Quality480 分别限制到 1080p / 720p / 480p。
+	// Quality2160 / Quality1440 / Quality1080 / Quality720 / Quality480 分别限制到 4K / 2K / 1080p / 720p / 480p。
+	Quality2160 = "2160"
+	Quality1440 = "1440"
 	Quality1080 = "1080"
 	Quality720  = "720"
 	Quality480  = "480"
@@ -40,7 +42,7 @@ const (
 // ValidQuality 报告清晰度档位是否为已知取值；空串视为最高可用。
 func ValidQuality(q string) bool {
 	switch q {
-	case "", QualityBest, Quality1080, Quality720, Quality480:
+	case "", QualityBest, Quality2160, Quality1440, Quality1080, Quality720, Quality480:
 		return true
 	default:
 		return false
@@ -50,6 +52,10 @@ func ValidQuality(q string) bool {
 // QualityMaxHeight 返回清晰度档位对应的视频高度上限（0 = 不限制）。
 func QualityMaxHeight(quality string) int {
 	switch quality {
+	case Quality2160:
+		return 2160
+	case Quality1440:
+		return 1440
 	case Quality1080:
 		return 1080
 	case Quality720:
