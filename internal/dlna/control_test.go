@@ -52,3 +52,28 @@ func TestBuildDIDLMetadata(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildDIDLFull(t *testing.T) {
+	meta := BuildDIDL(DIDLOptions{
+		Title:        "Movie & Trailer",
+		URI:          "http://192.168.1.2:5000/f/abc",
+		MIME:         "video/mp4",
+		DurationSec:  7265, // 2:01:05
+		Direct:       true,
+		SubtitleURL:  "http://192.168.1.2:5000/s/abc.srt",
+		SubtitleType: "srt",
+	})
+	for _, want := range []string{
+		"Movie &amp; Trailer",
+		`duration="2:01:05"`,
+		`protocolInfo="http-get:*:video/mp4:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"`,
+		`xmlns:sec="http://www.sec.co.kr/"`,
+		`<res protocolInfo="http-get:*:text/srt:*">http://192.168.1.2:5000/s/abc.srt</res>`,
+		`<sec:CaptionInfo sec:type="srt">http://192.168.1.2:5000/s/abc.srt</sec:CaptionInfo>`,
+		`<sec:CaptionInfoEx sec:type="srt">http://192.168.1.2:5000/s/abc.srt</sec:CaptionInfoEx>`,
+	} {
+		if !strings.Contains(meta, want) {
+			t.Errorf("DIDL 缺少 %q: %s", want, meta)
+		}
+	}
+}

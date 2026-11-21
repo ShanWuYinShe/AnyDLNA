@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -19,12 +20,13 @@ const mpegtsMIME = "video/mp2t"
 
 // session 是一次投屏对应的流会话。
 type session struct {
-	id     string
-	path   string // 源文件路径
-	direct bool   // true=原文件直出；false=ffmpeg 实时转码
-	mime   string
-	title  string
-	tc     *Transcoder // 仅转码模式非空
+	id           string
+	path         string // 源文件路径
+	direct       bool   // true=原文件直出；false=ffmpeg 实时转码
+	mime         string
+	title        string
+	subtitlePath string      // 外挂字幕路径（可选）
+	tc           *Transcoder // 仅转码模式非空
 }
 
 // StreamServer 在局域网侧提供媒体流 HTTP 服务。
@@ -50,6 +52,7 @@ func NewStreamServer() (*StreamServer, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/f/", s.serveDirect)
 	mux.HandleFunc("/t/", s.serveTranscode)
+	mux.HandleFunc("/s/", s.serveSubtitle)
 	s.server = &http.Server{Handler: mux}
 	go func() {
 		if err := s.server.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -75,17 +78,52 @@ func (s *StreamServer) Close() {
 	s.sessions = map[string]*session{}
 }
 
+// AddDirectWithSubtitle 注册带外挂字幕的直出会话，返回会话 ID。
+func (s *StreamServer) AddDirectWithSubtitle(path, mime, title, subtitlePath string) string {
+	return s.add(&session{id: newSessionID(), path: path, direct: true, mime: mime, title: title, subtitlePath: subtitlePath})
+}
+
 // AddDirect 注册直出会话，返回会话 ID。
 func (s *StreamServer) AddDirect(path, mime, title string) string {
-	return s.add(&session{id: newSessionID(), path: path, direct: true, mime: mime, title: title})
+	return s.AddDirectWithSubtitle(path, mime, title, "")
+}
+
+// AddTranscodeWithSubtitle 注册带外挂字幕的本地文件流会话，返回会话 ID。
+func (s *StreamServer) AddTranscodeWithSubtitle(path, title string, plan Plan, subtitlePath string) string {
+	return s.add(&session{
+		id: newSessionID(), path: path, direct: false,
+		mime: plan.OutputMIME(), title: title, tc: NewTranscoder(path, plan),
+		subtitlePath: subtitlePath,
+	})
 }
 
 // AddTranscode 注册本地文件流会话（按 plan 换封装或转码），返回会话 ID。
 func (s *StreamServer) AddTranscode(path, title string, plan Plan) string {
-	return s.add(&session{
-		id: newSessionID(), path: path, direct: false,
-		mime: plan.OutputMIME(), title: title, tc: NewTranscoder(path, plan),
-	})
+	return s.AddTranscodeWithSubtitle(path, title, plan, "")
+}
+
+// SetSubtitle 为指定会话补充或更新外挂字幕路径。
+func (s *StreamServer) SetSubtitle(id, subtitlePath string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sess := s.sessions[id]; sess != nil {
+		sess.subtitlePath = subtitlePath
+	}
+}
+
+// SubtitleURL 构造外挂字幕的 HTTP 地址。
+func (s *StreamServer) SubtitleURL(hostIP, id string) string {
+	s.mu.Lock()
+	sess := s.sessions[id]
+	s.mu.Unlock()
+	if sess == nil || sess.subtitlePath == "" {
+		return ""
+	}
+	ext := strings.ToLower(filepath.Ext(sess.subtitlePath))
+	if ext == "" {
+		ext = ".srt"
+	}
+	return fmt.Sprintf("http://%s:%d/s/%s%s", hostIP, s.Port(), id, ext)
 }
 
 // AddCamera 注册摄像头实时采集会话（macOS avfoundation），返回会话 ID。
@@ -172,6 +210,12 @@ func (s *StreamServer) serveDirect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
+
+	// DLNA 规范头：通知设备当前为流式传输，且原文件支持 HTTP 范围请求与拖动（DLNA.ORG_OP=01）
+	w.Header().Set("transferMode.dlna.org", "Streaming")
+	w.Header().Set("contentFeatures.dlna.org", "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000")
+	w.Header().Set("RealTimeInfo.dlna.org", "DLNA.ORG_TLR=-1")
+
 	// ServeContent 自带 Range/If-Range 处理，电视端拖动进度条即可按需取段。
 	http.ServeContent(w, r, filepath.Base(sess.path), time.Now(), f)
 }
@@ -193,9 +237,14 @@ func (s *StreamServer) serveTranscode(w http.ResponseWriter, r *http.Request) {
 	// 使用会话注册时的容器类型：可能是 MPEG-TS，也可能是碎片化 MP4。
 	w.Header().Set("Content-Type", sess.mime)
 	w.Header().Set("Connection", "close")
+	// DLNA 规范头：实时转码流不支持 Range 定位（DLNA.ORG_OP=00）
+	w.Header().Set("transferMode.dlna.org", "Streaming")
+	w.Header().Set("contentFeatures.dlna.org", "DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000")
+	w.Header().Set("RealTimeInfo.dlna.org", "DLNA.ORG_TLR=-1")
+
 	w.WriteHeader(http.StatusOK)
 	// 主动 flush，让电视端尽快收到数据开始起播。
-	counting := &countingFlushWriter{w: flushWriter{w}}
+	counting := &countingFlushWriter{w: &flushWriter{w: w, flushedAt: time.Now()}}
 	counting.flushHeader()
 
 	cancel, done, err := sess.tc.StreamTo(counting)
@@ -223,6 +272,49 @@ func (s *StreamServer) serveTranscode(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// serveSubtitle 提供外挂字幕文件下载（/s/{id} 或 /s/{id}.ext）。
+func (s *StreamServer) serveSubtitle(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/s/")
+	id := path
+	if idx := strings.IndexByte(path, '.'); idx >= 0 {
+		id = path[:idx]
+	}
+	s.mu.Lock()
+	sess := s.sessions[id]
+	s.mu.Unlock()
+	if sess == nil || sess.subtitlePath == "" {
+		http.NotFound(w, r)
+		return
+	}
+	f, err := os.Open(sess.subtitlePath)
+	if err != nil {
+		http.Error(w, "字幕文件不可读", http.StatusGone)
+		return
+	}
+	defer f.Close()
+
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "*")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	ext := strings.ToLower(filepath.Ext(sess.subtitlePath))
+	switch ext {
+	case ".vtt":
+		w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
+	case ".srt":
+		w.Header().Set("Content-Type", "text/srt; charset=utf-8")
+	case ".ass", ".ssa":
+		w.Header().Set("Content-Type", "text/x-ssa; charset=utf-8")
+	default:
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	}
+	http.ServeContent(w, r, filepath.Base(sess.subtitlePath), time.Now(), f)
+}
+
 // rateSummary 返回「平均速率 + 首字节耗时」的诊断后缀，用于投屏日志。
 // 送达 0 字节时明确标注，这是「电视端等不到数据就断开」的典型形态。
 func rateSummary(n int64, start time.Time) string {
@@ -239,7 +331,7 @@ func rateSummary(n int64, start time.Time) string {
 
 // countingFlushWriter 在 flushWriter 基础上统计送达字节数（连接诊断用）。
 type countingFlushWriter struct {
-	w  flushWriter
+	w  *flushWriter
 	n  int64
 	mu sync.Mutex
 }
@@ -259,22 +351,36 @@ func (c *countingFlushWriter) bytes() int64 {
 	return c.n
 }
 
-// flushWriter 在每次写入后主动 Flush，把转码输出尽快推给电视端。
+// flushWriter 在适当时机 Flush，兼顾首包起播速度与 TCP 吞吐。
 type flushWriter struct {
-	w http.ResponseWriter
+	w         http.ResponseWriter
+	flushedAt time.Time
+	pending   int
 }
 
-func (f flushWriter) Write(p []byte) (int, error) {
+func (f *flushWriter) Write(p []byte) (int, error) {
 	n, err := f.w.Write(p)
-	if flusher, ok := f.w.(http.Flusher); ok {
-		flusher.Flush()
+	if err != nil {
+		return n, err
 	}
-	return n, err
+	f.pending += n
+	now := time.Now()
+	// 累积满 16KB 或超过 100ms 刷新一次，避免频繁系统调用与小包碎片化
+	if f.pending >= 16*1024 || now.Sub(f.flushedAt) >= 100*time.Millisecond {
+		if flusher, ok := f.w.(http.Flusher); ok {
+			flusher.Flush()
+			f.flushedAt = now
+			f.pending = 0
+		}
+	}
+	return n, nil
 }
 
-func (f flushWriter) flushHeader() {
+func (f *flushWriter) flushHeader() {
 	if flusher, ok := f.w.(http.Flusher); ok {
 		flusher.Flush()
+		f.flushedAt = time.Now()
+		f.pending = 0
 	}
 }
 

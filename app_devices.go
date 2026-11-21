@@ -248,10 +248,11 @@ func (a *App) SearchDevices(timeoutMS int) ([]DeviceInfo, error) {
 type DeviceFormats struct {
 	// Queried 表示是否成功查询到设备能力（设备需提供 ConnectionManager）。
 	Queried bool `json:"queried"`
-	// SupportsTS / SupportsMP4 / SupportsMKV 是决策时实际关心的三项能力。
-	SupportsTS  bool `json:"supportsTs"`
-	SupportsMP4 bool `json:"supportsMp4"`
-	SupportsMKV bool `json:"supportsMkv"`
+	// SupportsTS / SupportsMP4 / SupportsMKV / SupportsHEVC 是决策时实际关心的能力。
+	SupportsTS   bool `json:"supportsTs"`
+	SupportsMP4  bool `json:"supportsMp4"`
+	SupportsMKV  bool `json:"supportsMkv"`
+	SupportsHEVC bool `json:"supportsHevc"`
 	// VideoMIMEs 是设备声明的全部视频格式（去重、排序）。
 	VideoMIMEs []string `json:"videoMIMEs"`
 }
@@ -279,6 +280,7 @@ func (a *App) DeviceCapabilityInfo(udn string) *DeviceFormats {
 	out.SupportsTS = caps.SupportsMIME(media.ContainerMPEGTS.MIME())
 	out.SupportsMP4 = caps.SupportsMIME(media.ContainerFMP4.MIME())
 	out.SupportsMKV = caps.SupportsMIME("video/x-matroska")
+	out.SupportsHEVC = caps.SupportsHEVC()
 	return out
 }
 
@@ -340,8 +342,13 @@ func (a *App) deviceCapabilities(dev *dlna.Device) media.DeviceCapabilities {
 		return media.DeviceCapabilities{}
 	}
 	mimes := caps.VideoMIMEs()
-	a.logf("设备 %s 声明支持 %d 种视频格式", dev.FriendlyName, len(mimes))
-	return media.DeviceCapabilities{Queried: true, MIMEs: mimes}
+	a.logf("设备 %s 声明支持 %d 种视频格式（HEVC: %v, AC3: %v）", dev.FriendlyName, len(mimes), caps.SupportsHEVC(), caps.SupportsAC3())
+	return media.DeviceCapabilities{
+		Queried:      true,
+		MIMEs:        mimes,
+		SupportsHEVC: caps.SupportsHEVC(),
+		SupportsAC3:  caps.SupportsAC3(),
+	}
 }
 
 // findDeviceLocked 按 UDN 在最近一次搜索结果中查找设备；调用方须持有 a.mu。

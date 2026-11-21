@@ -95,6 +95,28 @@ func TestProtocolCapabilitiesQueriedFlag(t *testing.T) {
 	if !queried.SupportsMIME("video/mp2t") {
 		t.Error("video/MP2T 应大小写无关地匹配 video/mp2t")
 	}
+	if queried.SupportsHEVC() {
+		t.Error("该设备未声明 HEVC，不应返回支持")
+	}
+
+	hevcCaps := ProtocolCapabilities{
+		Sink:    ParseProtocolInfo("http-get:*:video/mp4:DLNA.ORG_PN=HEVC_MP4_4K_AAC;DLNA.ORG_OP=01,http-get:*:video/hevc:*"),
+		Queried: true,
+	}
+	if !hevcCaps.SupportsHEVC() {
+		t.Error("应报告支持 HEVC")
+	}
+	if !hevcCaps.SupportsMIME("video/hevc") {
+		t.Error("应报告支持 video/hevc")
+	}
+
+	ac3Caps := ProtocolCapabilities{
+		Sink:    ParseProtocolInfo("http-get:*:audio/vnd.dolby.dd-raw:*,http-get:*:video/mp4:DLNA.ORG_PN=AVC_MP4_MP_HD_1080i_AC3"),
+		Queried: true,
+	}
+	if !ac3Caps.SupportsAC3() {
+		t.Error("应报告支持 AC3")
+	}
 }
 
 // TestVideoMIMEs 确认列表去重、排序且只含视频。

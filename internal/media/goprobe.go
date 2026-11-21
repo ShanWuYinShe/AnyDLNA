@@ -41,9 +41,10 @@ func goProbeFile(path string) (*Info, error) {
 		return nil, err
 	}
 	info := &Info{
-		Path:      path,
-		Title:     strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)),
-		SizeBytes: st.Size(),
+		Path:         path,
+		Title:        strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)),
+		SizeBytes:    st.Size(),
+		SubtitlePath: FindExternalSubtitle(path),
 		// 默认可流式；MP4/MOV 实测后修正（与原 ffprobe 路径语义一致）。
 		FastStart: true,
 	}
