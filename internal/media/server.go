@@ -218,6 +218,7 @@ func (s *StreamServer) serveDirect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// DLNA 规范头：通知设备当前为流式传输，且原文件支持 HTTP 范围请求与拖动（DLNA.ORG_OP=01）
+	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("transferMode.dlna.org", "Streaming")
 	w.Header().Set("contentFeatures.dlna.org", "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000")
 	w.Header().Set("RealTimeInfo.dlna.org", "DLNA.ORG_TLR=-1")
@@ -244,6 +245,8 @@ func (s *StreamServer) serveTranscode(w http.ResponseWriter, r *http.Request) {
 	// 使用会话注册时的容器类型：可能是 MPEG-TS，也可能是碎片化 MP4。
 	w.Header().Set("Content-Type", sess.mime)
 	w.Header().Set("Connection", "close")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
 	// DLNA 规范头：实时转码流不支持 Range 定位（DLNA.ORG_OP=00）
 	w.Header().Set("transferMode.dlna.org", "Streaming")
 	w.Header().Set("contentFeatures.dlna.org", "DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000")

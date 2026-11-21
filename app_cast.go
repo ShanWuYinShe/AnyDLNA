@@ -374,6 +374,8 @@ func (a *App) startCast(dev *dlna.Device, srv *media.StreamServer, sessionID, ti
 	a.castFile = title
 	a.castMode = mode
 	a.castDuration = durationSec
+	a.castMIME = streamMIME
+	a.castSubURL = subtitleURL
 	a.mu.Unlock()
 
 	a.saveCastState(dev.UDN, dev.Location, title, mode)
@@ -392,6 +394,8 @@ func (a *App) stopCast() {
 	a.castFile = ""
 	a.castMode = ""
 	a.castDuration = 0
+	a.castMIME = ""
+	a.castSubURL = ""
 	a.mu.Unlock()
 
 	if sessionID != "" && srv != nil {
@@ -540,14 +544,14 @@ func (a *App) SeekTo(sec float64) error {
 
 	a.mu.Lock()
 	srv := a.streamSrv
-	sessionID, castFile, castMode := a.sessionID, a.castFile, a.castMode
+	sessionID, castFile, castMode, castMIME, castDuration, castSubURL := a.sessionID, a.castFile, a.castMode, a.castMIME, a.castDuration, a.castSubURL
 	a.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if castMode == "direct" {
-		return renderer.Seek(ctx, dlna.SeekUnitABSTime, dlna.FormatClock(sec))
+		return renderer.Seek(ctx, dlna.SeekUnitRelTime, dlna.FormatClock(sec))
 	}
 	// 转码流（本地转码/在线中转）不支持随机拖动：让转码进程从新位置重启，
 	// 并让电视端重新拉流。
@@ -561,10 +565,16 @@ func (a *App) SeekTo(sec float64) error {
 	if playURL == "" {
 		return errors.New("获取本机局域网地址失败")
 	}
+	if castMIME == "" {
+		castMIME = "video/mp2t"
+	}
 	metadata := dlna.BuildDIDL(dlna.DIDLOptions{
-		Title: castFile,
-		URI:   playURL,
-		MIME:  "video/mp2t",
+		Title:       castFile,
+		URI:         playURL,
+		MIME:        castMIME,
+		DurationSec: castDuration,
+		Direct:      false,
+		SubtitleURL: castSubURL,
 	})
 	if err := renderer.SetAVTransportURI(ctx, playURL, metadata); err != nil {
 		media.Diagf("跳转失败 下发 %.1fs err=%v", sec, err)

@@ -2,6 +2,7 @@ package dlna
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,10 +16,10 @@ func TestFormatClock(t *testing.T) {
 		sec  float64
 		want string
 	}{
-		{0, "0:00:00"},
-		{65, "0:01:05"},
-		{3661, "1:01:01"},
-		{-5, "0:00:00"},
+		{0, "00:00:00"},
+		{65, "00:01:05"},
+		{3661, "01:01:01"},
+		{-5, "00:00:00"},
 		{3600 * 100, "100:00:00"},
 	}
 	for _, c := range cases {
@@ -67,16 +68,75 @@ func TestBuildDIDLFull(t *testing.T) {
 	})
 	for _, want := range []string{
 		"Movie &amp; Trailer",
-		`duration="2:01:05"`,
+		`duration="02:01:05"`,
 		`protocolInfo="http-get:*:video/mp4:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"`,
 		`xmlns:sec="http://www.sec.co.kr/"`,
 		`<res protocolInfo="http-get:*:text/srt:*">http://192.168.1.2:5000/s/abc.srt</res>`,
+		`<res protocolInfo="http-get:*:application/x-subrip:*">http://192.168.1.2:5000/s/abc.srt</res>`,
 		`<sec:CaptionInfo sec:type="srt">http://192.168.1.2:5000/s/abc.srt</sec:CaptionInfo>`,
 		`<sec:CaptionInfoEx sec:type="srt">http://192.168.1.2:5000/s/abc.srt</sec:CaptionInfoEx>`,
 	} {
 		if !strings.Contains(meta, want) {
 			t.Errorf("DIDL 缺少 %q: %s", want, meta)
 		}
+	}
+}
+
+// TestRendererSeekAdaptive 验证 Seek 动作在 REL_TIME 报错 710 时自动降级重试 ABS_TIME。
+func TestRendererSeekAdaptive(t *testing.T) {
+	var requestedUnits []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bodyBytes, _ := io.ReadAll(r.Body)
+		bodyStr := string(bodyBytes)
+		if strings.Contains(bodyStr, "<Unit>REL_TIME</Unit>") {
+			requestedUnits = append(requestedUnits, "REL_TIME")
+			// 模拟电视返回 710 Seek mode not supported
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`<?xml version="1.0"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+  <s:Body>
+    <s:Fault>
+      <faultcode>s:Client</faultcode>
+      <faultstring>UPnPError</faultstring>
+      <detail>
+        <UPnPError xmlns="urn:schemas-upnp-org:control-1-0">
+          <errorCode>710</errorCode>
+          <errorDescription>Seek mode not supported</errorDescription>
+        </UPnPError>
+      </detail>
+    </s:Fault>
+  </s:Body>
+</s:Envelope>`))
+			return
+		}
+		if strings.Contains(bodyStr, "<Unit>ABS_TIME</Unit>") {
+			requestedUnits = append(requestedUnits, "ABS_TIME")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`<?xml version="1.0"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Body>
+    <u:SeekResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"/>
+  </s:Body>
+</s:Envelope>`))
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer ts.Close()
+
+	dev := &Device{
+		FriendlyName: "TestTV",
+		Services: []Service{
+			{Type: AVTransportServiceType, ControlURL: ts.URL},
+		},
+	}
+	renderer := NewRenderer(dev)
+	err := renderer.Seek(context.Background(), SeekUnitRelTime, "00:05:00")
+	if err != nil {
+		t.Fatalf("Seek 自适应重试应成功，实际报错: %v", err)
+	}
+	if len(requestedUnits) != 2 || requestedUnits[0] != "REL_TIME" || requestedUnits[1] != "ABS_TIME" {
+		t.Errorf("请求序列不符合预期: %v", requestedUnits)
 	}
 }
 
