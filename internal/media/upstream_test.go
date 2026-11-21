@@ -415,3 +415,51 @@ func TestUpstreamStatRetry(t *testing.T) {
 		t.Fatalf("应探测 3 次，实际 %d 次", calls)
 	}
 }
+
+// TestUpstreamFetchChunkFallbackToVariant 验证在分片拉取遭遇 403 时能自动切换至备用候选变体节点成功拉取。
+func TestUpstreamFetchChunkFallbackToVariant(t *testing.T) {
+	payload := make([]byte, 128*1024)
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
+
+	// 备用服务器：提供正常数据
+	backupSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "backup.mp4", time.Now(), bytes.NewReader(payload))
+	}))
+	defer backupSrv.Close()
+
+	// 主服务器：stat 时正常放行，拉取具体分片时故意返回 403 模拟 CDN 节点断流
+	var statDone bool
+	primarySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !statDone {
+			statDone = true
+			http.ServeContent(w, r, "primary.mp4", time.Now(), bytes.NewReader(payload))
+			return
+		}
+		http.Error(w, "CDN node expired / 403 Forbidden", http.StatusForbidden)
+	}))
+	defer primarySrv.Close()
+
+	variants := []resolvedVariant{
+		{URL: backupSrv.URL, Codec: "avc1", Height: 1080},
+	}
+	up, err := newUpstreamWithVariants(primarySrv.URL, nil, variants, Options{ProxyMode: ProxyModeNone})
+	if err != nil {
+		t.Fatalf("创建带变体的上游失败: %v", err)
+	}
+	defer up.Close()
+
+	// 请求读取全部数据，此时主服务器 403 会触发自动切换变体到 backupSrv
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	up.ServeHTTP(rec, req)
+	resp := rec.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("期望状态码 200，实际得到 %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !bytes.Equal(body, payload) {
+		t.Fatalf("切换候选节点后拉取数据不一致")
+	}
+}
