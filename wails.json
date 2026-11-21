@@ -4,7 +4,7 @@
   "outputfilename": "any_dlna",
   "wailsjsdir": "./frontend",
   "info": {
-    "productVersion": "1.4.0"
+    "productVersion": "1.5.0"
   },
   "author": {
     "name": "winliyou",
