@@ -478,6 +478,7 @@ func (up *Upstream) ensureLocked(ctx context.Context, start, end int64) error {
 		up.mu.Unlock()
 		select {
 		case <-ctx.Done():
+			up.cond.Broadcast()
 			<-waitDone
 			up.mu.Lock()
 			return ctx.Err()
@@ -678,6 +679,14 @@ func (up *Upstream) fetchChunk(idx int64) {
 		if err != nil {
 			cancel()
 			lastErr = err
+			// 连接级故障（如连接拒绝、TLS握手超时）：尝试切换备用变体节点续拉
+			if isConnError(err) {
+				if !up.advanceVariant() {
+					up.mu.Lock()
+					up.variantIdx = 0
+					up.mu.Unlock()
+				}
+			}
 			continue
 		}
 		want := http.StatusOK
@@ -689,6 +698,12 @@ func (up *Upstream) fetchChunk(idx int64) {
 			_ = resp.Body.Close()
 			cancel()
 			lastErr = fmt.Errorf("上游返回 %s", resp.Status)
+			// 节点返回异常状态码（403防盗链过期/404/502/503等）：尝试切换备用变体节点续拉
+			if !up.advanceVariant() {
+				up.mu.Lock()
+				up.variantIdx = 0
+				up.mu.Unlock()
+			}
 			continue
 		}
 		var skip, pos int64
