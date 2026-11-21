@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -83,8 +84,9 @@ func isRegularFile(path string) bool {
 	return err == nil && !st.IsDir() && st.Size() > 0
 }
 
-// ExtractEmbeddedSubtitle 尝试从媒体文件中提取第一路内嵌文本字幕并保存至临时缓存。
-// 若无内嵌字幕或提取失败则返回空串与错误。
+// ExtractEmbeddedSubtitle 尝试从媒体文件中提取最佳内嵌文本字幕并保存至临时缓存。
+// 优先选择中文字幕（按语言代码 chi/zho/chs/cht 或标题标识匹配）；
+// 无中文时降级选用首路字幕；若无内嵌字幕或提取失败则返回空串与错误。
 func ExtractEmbeddedSubtitle(ctx context.Context, videoPath string) (string, error) {
 	videoPath = strings.TrimSpace(videoPath)
 	if videoPath == "" {
@@ -105,8 +107,15 @@ func ExtractEmbeddedSubtitle(ctx context.Context, videoPath string) (string, err
 		return "", err
 	}
 
-	// 结合路径、大小与修改时间计算哈希，避免重复提取
-	key := fmt.Sprintf("%s|%d|%d", videoPath, st.Size(), st.ModTime().UnixNano())
+	bestMap := "0:s:0"
+	probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	if m := findBestSubtitleMap(probeCtx, ffmpegPath, videoPath); m != "" {
+		bestMap = m
+	}
+	cancel()
+
+	// 结合路径、大小、修改时间与字幕流映射计算哈希，避免重复提取
+	key := fmt.Sprintf("%s|%d|%d|%s", videoPath, st.Size(), st.ModTime().UnixNano(), bestMap)
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(key)))[:16]
 	destPath := filepath.Join(cacheDir, filepath.Base(videoPath)+"."+hash+".srt")
 
@@ -117,7 +126,7 @@ func ExtractEmbeddedSubtitle(ctx context.Context, videoPath string) (string, err
 	cmd := exec.CommandContext(ctx, ffmpegPath,
 		"-hide_banner", "-loglevel", "error", "-y",
 		"-i", videoPath,
-		"-map", "0:s:0",
+		"-map", bestMap,
 		"-c:s", "srt",
 		destPath,
 	)
@@ -131,6 +140,84 @@ func ExtractEmbeddedSubtitle(ctx context.Context, videoPath string) (string, err
 	}
 	_ = os.Remove(destPath)
 	return "", errors.New("提取字幕为空")
+}
+
+// findBestSubtitleMap 解析 ffmpeg -i 的流元数据输出，寻找最适合的中文字幕流（0:s:N）。
+func findBestSubtitleMap(ctx context.Context, ffmpegPath, videoPath string) string {
+	cmd := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-i", videoPath)
+	out, _ := cmd.CombinedOutput()
+	return findBestSubtitleMapFromOutput(string(out))
+}
+
+// findBestSubtitleMapFromOutput 从 ffmpeg 文本输出中识别字幕轨，优先命中中文，无中文降级首路字幕。
+func findBestSubtitleMapFromOutput(output string) string {
+	lines := strings.Split(output, "\n")
+	type subEntry struct {
+		index    int
+		language string
+		title    string
+	}
+
+	var subs []subEntry
+	var currentSub *subEntry
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// 检测 Stream 行
+		if strings.HasPrefix(trimmed, "Stream #") {
+			if strings.Contains(trimmed, "Subtitle:") {
+				lang := ""
+				if openParen := strings.Index(trimmed, "("); openParen != -1 {
+					if colon := strings.Index(trimmed, "):"); colon != -1 && colon > openParen {
+						lang = strings.ToLower(strings.TrimSpace(trimmed[openParen+1 : colon]))
+					}
+				}
+				subs = append(subs, subEntry{
+					index:    len(subs),
+					language: lang,
+				})
+				currentSub = &subs[len(subs)-1]
+			} else {
+				currentSub = nil
+			}
+			continue
+		}
+
+		// 提取 subtitle metadata 中的 title
+		if currentSub != nil && strings.HasPrefix(trimmed, "title") {
+			if colon := strings.Index(trimmed, ":"); colon != -1 {
+				currentSub.title = strings.ToLower(strings.TrimSpace(trimmed[colon+1:]))
+			}
+		}
+	}
+
+	if len(subs) == 0 {
+		return ""
+	}
+
+	// 优先寻找带有中文特征的字幕流
+	for _, sub := range subs {
+		isChinese := false
+		switch sub.language {
+		case "chi", "zho", "chs", "cht", "zh", "cmn":
+			isChinese = true
+		}
+		if !isChinese && sub.title != "" {
+			if strings.Contains(sub.title, "中") ||
+				strings.Contains(sub.title, "简") ||
+				strings.Contains(sub.title, "繁") ||
+				strings.Contains(sub.title, "chinese") ||
+				strings.Contains(sub.title, "chs") ||
+				strings.Contains(sub.title, "cht") {
+				isChinese = true
+			}
+		}
+		if isChinese {
+			return fmt.Sprintf("0:s:%d", sub.index)
+		}
+	}
+
+	return "0:s:0"
 }
 
 // NormalizeSubtitleEncoding 检测并归一化字幕文件字符编码为纯 UTF-8，
