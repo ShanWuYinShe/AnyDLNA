@@ -48,6 +48,8 @@ type App struct {
 	castFile     string
 	castMode     string
 	castDuration float64
+	castMIME     string
+	castSubURL   string
 }
 
 // controlTimeout 是播放控制与音量操作的单次超时；pollTimeout 是进度轮询的

@@ -56,15 +56,43 @@ func (r *Renderer) Stop(ctx context.Context) error {
 	return r.avTransport(ctx, "Stop", nil)
 }
 
-// SeekUnit ABS_TIME 表示跳转到媒体内的绝对时间点。
-const SeekUnitABSTime = "ABS_TIME"
+// SeekUnit REL_TIME 与 ABS_TIME 时间寻址单位。
+// REL_TIME（相对时间）是绝大多数 DLNA 电视（三星、索尼、LG、小米、海信等）单视频播放的标准寻址单位；
+// ABS_TIME（绝对时间）供部分只支持绝对时间的老旧设备备选。
+const (
+	SeekUnitRelTime = "REL_TIME"
+	SeekUnitABSTime = "ABS_TIME"
+)
 
-// Seek 跳转到 target 指定的时间点，格式为 H:MM:SS。
+// Seek 跳转到 target 指定的时间点（格式为 HH:MM:SS）。
+// 优先使用给定的 unit（通常为 REL_TIME）；若设备报 710（Seek mode not supported）或 402（Invalid Args），
+// 自动在 REL_TIME 与 ABS_TIME 之间切换重试一次，彻底消除不同电视固件寻址单位不一致导致的失败。
 func (r *Renderer) Seek(ctx context.Context, unit, target string) error {
-	return r.avTransport(ctx, "Seek", [][2]string{
+	if unit == "" {
+		unit = SeekUnitRelTime
+	}
+	err := r.avTransport(ctx, "Seek", [][2]string{
 		{"Unit", unit},
 		{"Target", target},
 	})
+	if err == nil {
+		return nil
+	}
+	// 判断是否由于设备不支持当前单位触发的 710 / 402
+	errStr := err.Error()
+	if strings.Contains(errStr, "710") || strings.Contains(errStr, "402") {
+		fallbackUnit := SeekUnitABSTime
+		if unit == SeekUnitABSTime {
+			fallbackUnit = SeekUnitRelTime
+		}
+		if ferr := r.avTransport(ctx, "Seek", [][2]string{
+			{"Unit", fallbackUnit},
+			{"Target", target},
+		}); ferr == nil {
+			return nil
+		}
+	}
+	return err
 }
 
 // TransportState 的标准取值（UPnP AVTransport），供调用方比较用，
@@ -177,13 +205,15 @@ func (r *Renderer) SetMute(ctx context.Context, mute bool) error {
 	return err
 }
 
-// FormatClock 把秒数格式化为 UPnP 的 H:MM:SS 时间文本。
+// FormatClock 把秒数格式化为 UPnP 标准的 HH:MM:SS 时间文本。
+// 使用两位小时（%02d）确保严格遵循 UPnP AVTransport / DLNA 规范，
+// 同时兼容要求两位小时的设备（如部分索尼/松下设备）。
 func FormatClock(seconds float64) string {
 	if seconds < 0 {
 		seconds = 0
 	}
 	total := int(seconds + 0.5)
-	return fmt.Sprintf("%d:%02d:%02d", total/3600, (total%3600)/60, total%60)
+	return fmt.Sprintf("%02d:%02d:%02d", total/3600, (total%3600)/60, total%60)
 }
 
 // ParseClock 解析 UPnP 的 H:MM:SS（或 H:MM:SS.fraction）时间文本为秒数。
@@ -256,8 +286,11 @@ func BuildDIDL(opts DIDLOptions) string {
 		if subType == "" {
 			subType = "srt"
 		}
-		// 1. 标准 DLNA 字幕资源
+		// 1. 标准 DLNA 字幕资源（text/srt 与通用 application/x-subrip 兼容声明）
 		sb.WriteString(`<res protocolInfo="http-get:*:text/` + subType + `:*">` + subURI + `</res>`)
+		if subType == "srt" {
+			sb.WriteString(`<res protocolInfo="http-get:*:application/x-subrip:*">` + subURI + `</res>`)
+		}
 		// 2. 三星与 LG 私有扩展标签
 		sb.WriteString(`<sec:CaptionInfo sec:type="` + subType + `">` + subURI + `</sec:CaptionInfo>`)
 		sb.WriteString(`<sec:CaptionInfoEx sec:type="` + subType + `">` + subURI + `</sec:CaptionInfoEx>`)

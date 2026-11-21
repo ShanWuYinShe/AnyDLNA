@@ -792,3 +792,73 @@ func TestPollFallbackDuration(t *testing.T) {
 		t.Errorf("总时长应回退到已记录的 3600 秒，实际得到 %f", pos.DurationSec)
 	}
 }
+
+// TestSeekToPreservesMetadata 验证转码模式下 SeekTo 重构的 DIDL 能正确保留 MIME、Duration 与 SubtitleURL。
+func TestSeekToPreservesMetadata(t *testing.T) {
+	var capturedDIDL string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		bodyStr := string(body)
+		w.WriteHeader(http.StatusOK)
+		if strings.Contains(bodyStr, "SetAVTransportURI") {
+			capturedDIDL = bodyStr
+			w.Write([]byte(`<?xml version="1.0"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Body>
+    <u:SetAVTransportURIResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"/>
+  </s:Body>
+</s:Envelope>`))
+			return
+		}
+		if strings.Contains(bodyStr, "Play") {
+			w.Write([]byte(`<?xml version="1.0"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Body>
+    <u:PlayResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"/>
+  </s:Body>
+</s:Envelope>`))
+			return
+		}
+	}))
+	defer ts.Close()
+
+	app := NewApp()
+	srv, err := media.NewStreamServer()
+	if err != nil {
+		t.Fatalf("创建流服务失败: %v", err)
+	}
+	defer srv.Close()
+	sessID := srv.AddTranscodeWithSubtitle("dummy.mkv", "测试电影", media.Plan{Mode: media.OutputTranscode, Container: media.ContainerFMP4}, "sub.srt")
+
+	dev := &dlna.Device{
+		FriendlyName: "TestTV",
+		Services: []dlna.Service{
+			{Type: dlna.AVTransportServiceType, ControlURL: ts.URL},
+		},
+	}
+	app.streamSrv = srv
+	app.renderer = dlna.NewRenderer(dev)
+	app.sessionID = sessID
+	app.castFile = "测试电影"
+	app.castMode = "transcode"
+	app.castDuration = 5400.0
+	app.castMIME = "video/mp4"
+	app.castSubURL = "http://127.0.0.1:9999/s/123.srt"
+
+	// 执行 SeekTo 跳转到第 120 秒
+	err = app.SeekTo(120)
+	if err != nil {
+		t.Fatalf("SeekTo 失败: %v", err)
+	}
+
+	// 验证捕获到的 DIDL XML 中是否包含对应的 MIME、时长与字幕标签
+	if !strings.Contains(capturedDIDL, "video/mp4") {
+		t.Errorf("DIDL 缺少保存的 MIME (video/mp4): %s", capturedDIDL)
+	}
+	if !strings.Contains(capturedDIDL, `01:30:00`) {
+		t.Errorf("DIDL 缺少格式化的总时长 (01:30:00): %s", capturedDIDL)
+	}
+	if !strings.Contains(capturedDIDL, "http://127.0.0.1:9999/s/123.srt") {
+		t.Errorf("DIDL 缺少保存的外挂字幕 URL: %s", capturedDIDL)
+	}
+}
