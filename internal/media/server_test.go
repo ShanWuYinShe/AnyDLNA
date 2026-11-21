@@ -43,6 +43,13 @@ func TestStreamServerDirectWithRange(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || len(body) != len(content) {
 		t.Fatalf("全量拉取异常: status=%d len=%d", resp.StatusCode, len(body))
 	}
+	// 校验 DLNA 规范头
+	if got := resp.Header.Get("transferMode.dlna.org"); got != "Streaming" {
+		t.Errorf("缺少或错误的 transferMode.dlna.org: %q", got)
+	}
+	if got := resp.Header.Get("contentFeatures.dlna.org"); !strings.Contains(got, "DLNA.ORG_OP=01") {
+		t.Errorf("缺少或错误的 contentFeatures.dlna.org: %q", got)
+	}
 
 	// Range 拉取：模拟电视端拖动进度。
 	req, _ := http.NewRequest(http.MethodGet, url, nil)
@@ -117,4 +124,42 @@ func TestStreamServerSetTranscodeOffset(t *testing.T) {
 	srv.SetTranscodeOffset(id, 42.5)
 	// 此时无电视拉流，不应有 ffmpeg 残留进程。
 	srv.Remove(id)
+}
+
+func TestStreamServerSubtitle(t *testing.T) {
+	srv, err := NewStreamServer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	subPath := filepath.Join(t.TempDir(), "test.srt")
+	subContent := []byte("1\n00:00:01,000 --> 00:00:02,000\nHello\n")
+	if err := os.WriteFile(subPath, subContent, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	vidPath := newTestFile(t, []byte("fake-video"))
+	id := srv.AddDirectWithSubtitle(vidPath, "video/mp4", "test", subPath)
+
+	subURL := srv.SubtitleURL("127.0.0.1", id)
+	if !strings.Contains(subURL, "/s/"+id+".srt") {
+		t.Fatalf("SubtitleURL 格式异常: %s", subURL)
+	}
+
+	resp, err := http.Get(subURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("字幕拉取状态异常: %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/srt") {
+		t.Errorf("字幕 Content-Type 异常: %s", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != string(subContent) {
+		t.Errorf("字幕内容不符: %s", body)
+	}
 }

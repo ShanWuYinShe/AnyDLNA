@@ -61,5 +61,5 @@ func (a *App) CastCamera(udn, videoDevice, audioDevice string, screen bool, titl
 		return nil, fmt.Errorf("获取本机局域网地址失败: %w", err)
 	}
 	playURL := srv.URL(ip, sessionID, false)
-	return a.startCast(dev, srv, sessionID, title, playURL, plan.OutputMIME(), string(plan.Mode), ctx)
+	return a.startCast(dev, srv, sessionID, title, playURL, plan.OutputMIME(), string(plan.Mode), ctx, 0, "")
 }

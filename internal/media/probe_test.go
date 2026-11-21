@@ -128,6 +128,63 @@ func TestPlanForLocalNegotiation(t *testing.T) {
 	}
 }
 
+func TestPlanForLocalWithHEVC(t *testing.T) {
+	caps := DeviceCapabilities{
+		Queried:      true,
+		MIMEs:        []string{"video/mp4", "video/x-matroska", "video/mp2t", "video/hevc"},
+		SupportsHEVC: true,
+		SupportsAC3:  true,
+	}
+
+	cases := []struct {
+		name string
+		info Info
+		want Plan
+	}{
+		{
+			"MP4 HEVC AAC + 设备支持 HEVC 与 MP4：原文件直出",
+			Info{Path: "/a/m.mp4", Container: "mov,mp4,m4a,3gp,3g2,mj2",
+				VideoCodec: "hevc", AudioCodec: "aac", FastStart: true},
+			Plan{Mode: OutputDirect, CopyVideo: true, CopyAudio: true, DirectMIME: "video/mp4"},
+		},
+		{
+			"MKV HEVC AAC + 设备支持 HEVC 与 MKV：原文件直出",
+			Info{Path: "/a/m.mkv", Container: "matroska,webm",
+				VideoCodec: "hevc", AudioCodec: "aac", FastStart: true},
+			Plan{Mode: OutputDirect, CopyVideo: true, CopyAudio: true, DirectMIME: "video/x-matroska"},
+		},
+		{
+			"MKV HEVC AC3 + 设备支持 HEVC 与 MKV：原文件直出",
+			Info{Path: "/a/m.mkv", Container: "matroska,webm",
+				VideoCodec: "hevc", AudioCodec: "ac3", FastStart: true},
+			Plan{Mode: OutputDirect, CopyVideo: true, CopyAudio: true, DirectMIME: "video/x-matroska"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := PlanForLocal(&c.info, caps)
+			if got != c.want {
+				t.Errorf("PlanForLocal() = %+v, 期望 %+v", got, c.want)
+			}
+		})
+	}
+
+	// 设备不支持 MKV 容器时，回退到换封装为 MPEG-TS
+	capsNoMkv := DeviceCapabilities{
+		Queried:      true,
+		MIMEs:        []string{"video/mp4", "video/mp2t"},
+		SupportsHEVC: true,
+		SupportsAC3:  true,
+	}
+	mkvInfo := Info{Path: "/a/m.mkv", Container: "matroska,webm",
+		VideoCodec: "hevc", AudioCodec: "ac3", FastStart: false}
+	got := PlanForLocal(&mkvInfo, capsNoMkv)
+	wantRemux := Plan{Mode: OutputRemux, Container: ContainerMPEGTS, CopyVideo: true, CopyAudio: true}
+	if got != wantRemux {
+		t.Errorf("设备不支持 MKV 时应换封装为 TS: got=%+v, want=%+v", got, wantRemux)
+	}
+}
+
 // TestPlanForLocalWithoutCapabilities 覆盖设备能力未知（未提供 ConnectionManager）
 // 时的保守回退：不直出，但 H.264 仍走换封装而非转码。
 func TestPlanForLocalWithoutCapabilities(t *testing.T) {

@@ -171,19 +171,76 @@ func ParseClock(text string) (float64, error) {
 	return h*3600 + m*60 + s, nil
 }
 
-// BuildDIDLMetadata 构造 SetAVTransportURI 所需的 DIDL-Lite 元数据。
-// 某些电视不校验元数据，但携带标题与 upnp:class 可以让电视端显示片名并正确归类。
+// DIDLOptions 包含构造 DIDL-Lite 描述所需的元数据字段。
+type DIDLOptions struct {
+	Title        string
+	URI          string
+	MIME         string
+	DurationSec  float64
+	Direct       bool
+	SubtitleURL  string
+	SubtitleType string // 如 "srt"
+}
+
+// BuildDIDL 构造 SetAVTransportURI 所需的完整 DIDL-Lite 元数据。
+// 针对三星、LG、索尼等设备注入标准 protocolInfo 特性参数、总时长与字幕扩展。
+func BuildDIDL(opts DIDLOptions) string {
+	title := escapeXML(opts.Title)
+	uri := escapeXML(opts.URI)
+	mime := opts.MIME
+	if mime == "" {
+		mime = "video/mp4"
+	}
+
+	protoInfo := "http-get:*:" + mime + ":*"
+	if opts.Direct {
+		protoInfo = "http-get:*:" + mime + ":DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+	}
+
+	var durAttr string
+	if opts.DurationSec > 0 {
+		durAttr = ` duration="` + FormatClock(opts.DurationSec) + `"`
+	}
+
+	var sb strings.Builder
+	sb.WriteString(`<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"`)
+	sb.WriteString(` xmlns:dc="http://purl.org/dc/elements/1.1/"`)
+	sb.WriteString(` xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"`)
+	if opts.SubtitleURL != "" {
+		// 三星与 LG 智能电视字幕扩展命名空间
+		sb.WriteString(` xmlns:sec="http://www.sec.co.kr/"`)
+	}
+	sb.WriteString(`><item id="0" restricted="1">`)
+	sb.WriteString(`<dc:title>` + title + `</dc:title>`)
+	sb.WriteString(`<upnp:class>object.item.videoItem</upnp:class>`)
+	sb.WriteString(`<res protocolInfo="` + protoInfo + `"` + durAttr + `>` + uri + `</res>`)
+
+	if opts.SubtitleURL != "" {
+		subURI := escapeXML(opts.SubtitleURL)
+		subType := opts.SubtitleType
+		if subType == "" {
+			subType = "srt"
+		}
+		// 1. 标准 DLNA 字幕资源
+		sb.WriteString(`<res protocolInfo="http-get:*:text/` + subType + `:*">` + subURI + `</res>`)
+		// 2. 三星与 LG 私有扩展标签
+		sb.WriteString(`<sec:CaptionInfo sec:type="` + subType + `">` + subURI + `</sec:CaptionInfo>`)
+		sb.WriteString(`<sec:CaptionInfoEx sec:type="` + subType + `">` + subURI + `</sec:CaptionInfoEx>`)
+	}
+
+	sb.WriteString(`</item></DIDL-Lite>`)
+	return sb.String()
+}
+
+// BuildDIDLMetadata 构造 SetAVTransportURI 所需的 DIDL-Lite 元数据（兼容基础调用）。
 func BuildDIDLMetadata(title, uri, mime string) string {
-	title = strings.ReplaceAll(title, "&", "&amp;")
-	title = strings.ReplaceAll(title, "<", "&lt;")
-	title = strings.ReplaceAll(title, ">", "&gt;")
-	uri = strings.ReplaceAll(uri, "&", "&amp;")
-	return `<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"` +
-		` xmlns:dc="http://purl.org/dc/elements/1.1/"` +
-		` xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">` +
-		`<item id="0" restricted="1">` +
-		`<dc:title>` + title + `</dc:title>` +
-		`<upnp:class>object.item.videoItem</upnp:class>` +
-		`<res protocolInfo="http-get:*:` + mime + `:*">` + uri + `</res>` +
-		`</item></DIDL-Lite>`
+	return BuildDIDL(DIDLOptions{Title: title, URI: uri, MIME: mime})
+}
+
+func escapeXML(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	s = strings.ReplaceAll(s, `"`, "&quot;")
+	return s
 }

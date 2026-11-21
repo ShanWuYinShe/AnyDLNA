@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -331,9 +332,21 @@ func (t *Transcoder) StreamTo(w io.Writer) (cancel func(), done <-chan struct{},
 			if ssSec > 0 && !t.isLive {
 				ss = strconv.FormatFloat(ssSec, 'f', 2, 64)
 			}
-			for _, u := range urls {
+			for i, u := range urls {
 				if ss != "" {
 					args = append(args, "-ss", ss)
+				}
+				// 网络抖动自动重连，防止直播瞬时卡顿导致流进程退出
+				args = append(args, "-reconnect", "1", "-reconnect_at_eof", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5")
+				// 携带防盗链必需的请求头（Referer/UA/Origin 等）
+				if i < len(t.cachedHeaders) && len(t.cachedHeaders[i]) > 0 {
+					var hsb strings.Builder
+					for k, v := range t.cachedHeaders[i] {
+						hsb.WriteString(k + ": " + v + "\r\n")
+					}
+					if hsb.Len() > 0 {
+						args = append(args, "-headers", hsb.String())
+					}
 				}
 				args = append(args, "-i", u)
 			}
@@ -796,9 +809,7 @@ func codecArgs(plan Plan, audioInput int) []string {
 	if plan.CopyVideo {
 		args = append(args, "-c:v", "copy")
 	} else {
-		args = append(args,
-			"-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-			"-maxrate", "4M", "-bufsize", "8M", "-pix_fmt", "yuv420p")
+		args = append(args, selectVideoEncoderArgs()...)
 	}
 
 	if plan.CopyAudio {
@@ -810,20 +821,74 @@ func codecArgs(plan Plan, audioInput int) []string {
 	return args
 }
 
+// selectVideoEncoderArgs 优先选用平台硬件加速编码器，未提供时平滑回退到 libx264 软编。
+func selectVideoEncoderArgs() []string {
+	if runtime.GOOS == "darwin" && hasVideoToolbox() {
+		return []string{
+			"-c:v", "h264_videotoolbox",
+			"-b:v", "6M", "-maxrate", "10M", "-bufsize", "12M",
+			"-pix_fmt", "yuv420p",
+		}
+	}
+	return []string{
+		"-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+		"-maxrate", "4M", "-bufsize", "8M", "-pix_fmt", "yuv420p",
+	}
+}
+
+var (
+	vtOnce  sync.Once
+	vtAvail bool
+)
+
+// hasVideoToolbox 检测本机 ffmpeg 是否支持 Apple VideoToolbox 硬件加速。
+func hasVideoToolbox() bool {
+	if runtime.GOOS != "darwin" {
+		return false
+	}
+	vtOnce.Do(func() {
+		ffmpegPath, ok := ResolveTool("ffmpeg")
+		if !ok {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-loglevel", "error",
+			"-f", "lavfi", "-i", "nullsrc=s=64x64:d=0.04",
+			"-c:v", "h264_videotoolbox", "-f", "null", "-")
+		if err := cmd.Run(); err == nil {
+			vtAvail = true
+			Diagf("启用硬件加速转码: h264_videotoolbox")
+		} else {
+			Diagf("硬件加速自检未通过，使用软解软编: %v", err)
+		}
+	})
+	return vtAvail
+}
+
 // containerArgs 返回目标容器的封装参数。
 //
 // MPEG-TS 是 DLNA 的通用基线，绝大多数设备都能直接播放；
 // 碎片化 MP4 用于设备只声明支持 MP4、不支持 TS 的场景：
 // frag_keyframe + empty_moov 让索引前置并按关键帧分片，
 // 从而可以边生成边推流（普通 MP4 需要回写索引，无法流式输出）。
+//
+// 注入 -avoid_negative_ts make_zero 与 -fflags +genpts：校准时间戳从 0 起步，
+// 消除源视频时间戳跳变引发的 Non-monotonous DTS 与电视端画面冻结；
+// 对 TS 注入 -muxdelay 0 -muxpreload 0 实现低延迟平滑包流输出。
 func containerArgs(container OutputContainer) []string {
 	if container == ContainerFMP4 {
 		return []string{
 			"-movflags", "frag_keyframe+empty_moov+default_base_moof",
+			"-avoid_negative_ts", "make_zero", "-fflags", "+genpts",
 			"-f", "mp4", "pipe:1",
 		}
 	}
-	return []string{"-f", "mpegts", "pipe:1"}
+	return []string{
+		"-avoid_negative_ts", "make_zero", "-fflags", "+genpts",
+		"-muxdelay", "0", "-muxpreload", "0",
+		"-f", "mpegts", "pipe:1",
+	}
 }
 
 // launchLocked 启动 ffmpeg 并登记进程组；src/srcAudio 为管道模式的上游

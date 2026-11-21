@@ -674,3 +674,57 @@ func itoaKb(n int64) string {
 	}
 	return strconv.Itoa(int(kb))
 }
+
+// TestPlayWithRetry 覆盖遇到 UPnP 705（Transport is locked）时的退避重试逻辑。
+func TestPlayWithRetry(t *testing.T) {
+	attempts := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts < 3 {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`<?xml version="1.0"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Body>
+    <s:Fault>
+      <faultcode>s:Client</faultcode>
+      <faultstring>UPnPError</faultstring>
+      <detail>
+        <UPnPError xmlns="urn:schemas-upnp-org:control-1-0">
+          <errorCode>705</errorCode>
+          <errorDescription>Transport is locked</errorDescription>
+        </UPnPError>
+      </detail>
+    </s:Fault>
+  </s:Body>
+</s:Envelope>`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`<?xml version="1.0"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Body>
+    <u:PlayResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"/>
+  </s:Body>
+</s:Envelope>`))
+	}))
+	defer ts.Close()
+
+	dev := &dlna.Device{
+		FriendlyName: "TestTV",
+		Services: []dlna.Service{
+			{Type: dlna.AVTransportServiceType, ControlURL: ts.URL},
+		},
+	}
+	renderer := dlna.NewRenderer(dev)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	err := playWithRetry(ctx, renderer, 3, 20*time.Millisecond)
+	if err != nil {
+		t.Fatalf("playWithRetry 遇到 705 连续重试应成功: %v", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("期望重试 3 次，实际 %d 次", attempts)
+	}
+}

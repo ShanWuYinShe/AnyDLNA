@@ -31,6 +31,9 @@ type PickedVideo struct {
 	// FastStart 表示 MP4 的索引是否在文件开头；false 时无法边下边播，
 	// 会改用换封装以立即起播。
 	FastStart bool `json:"fastStart"`
+	// SubtitlePath / SubtitleName 是同目录下匹配到的外挂字幕（如有）。
+	SubtitlePath string `json:"subtitlePath"`
+	SubtitleName string `json:"subtitleName"`
 }
 
 // CastStatus 描述当前投屏状态。
@@ -87,18 +90,23 @@ func (a *App) PickVideo(udn string) (*PickedVideo, error) {
 		return nil, err
 	}
 	plan := media.PlanForLocal(info, a.capabilitiesFor(udn))
+	subName := ""
+	if info.SubtitlePath != "" {
+		subName = filepath.Base(info.SubtitlePath)
+	}
 	return &PickedVideo{
-		Path:        path,
-		Name:        info.Title,
-		DurationSec: info.DurationSec,
-		VideoCodec:  strings.ToUpper(info.VideoCodec),
-		AudioCodec:  strings.ToUpper(info.AudioCodec),
-		Width:       info.Width,
-		Height:      info.Height,
-		SizeMB:      float64(info.SizeBytes) / 1024 / 1024,
-		Mode:        string(plan.Mode),
-		// FastStart 为 false 时说明该 MP4 索引在末尾，无法边下边播。
-		FastStart: info.FastStart,
+		Path:         path,
+		Name:         info.Title,
+		DurationSec:  info.DurationSec,
+		VideoCodec:   strings.ToUpper(info.VideoCodec),
+		AudioCodec:   strings.ToUpper(info.AudioCodec),
+		Width:        info.Width,
+		Height:       info.Height,
+		SizeMB:       float64(info.SizeBytes) / 1024 / 1024,
+		Mode:         string(plan.Mode),
+		FastStart:    info.FastStart,
+		SubtitlePath: info.SubtitlePath,
+		SubtitleName: subName,
 	}, nil
 }
 
@@ -138,19 +146,23 @@ func (a *App) Cast(udn, path, titleOverride string) (*CastStatus, error) {
 	var sessionID, mime, mode string
 	switch plan.Mode {
 	case media.OutputDirect:
-		sessionID = srv.AddDirect(path, plan.OutputMIME(), title)
+		sessionID = srv.AddDirectWithSubtitle(path, plan.OutputMIME(), title, info.SubtitlePath)
 		mime, mode = plan.OutputMIME(), string(plan.Mode)
 	default:
-		sessionID = srv.AddTranscode(path, title, plan)
+		sessionID = srv.AddTranscodeWithSubtitle(path, title, plan, info.SubtitlePath)
 		mime, mode = plan.OutputMIME(), string(plan.Mode)
 	}
 	ip, err := netutil.LANIP()
 	if err != nil {
 		srv.Remove(sessionID)
-		return nil, fmt.Errorf("获取本机局域网地址失败: %w", err)
+		return nil, fmt.Errorf("获取本机局网地址失败: %w", err)
 	}
 	playURL := srv.URL(ip, sessionID, plan.IsDirect())
-	return a.startCast(dev, srv, sessionID, title, playURL, mime, mode, ctx)
+	subURL := ""
+	if info.SubtitlePath != "" {
+		subURL = srv.SubtitleURL(ip, sessionID)
+	}
+	return a.startCast(dev, srv, sessionID, title, playURL, mime, mode, ctx, info.DurationSec, subURL)
 }
 
 // ResolveURL 解析在线视频页面地址，返回标题、时长等预览信息。
@@ -277,7 +289,7 @@ func (a *App) CastURL(udn, rawURL, titleOverride string) (*CastStatus, error) {
 		return nil, fmt.Errorf("获取本机局域网地址失败: %w", err)
 	}
 	playURL := srv.URL(ip, sessionID, false)
-	status, err := a.startCast(dev, srv, sessionID, title, playURL, plan.OutputMIME(), string(plan.Mode), ctx)
+	status, err := a.startCast(dev, srv, sessionID, title, playURL, plan.OutputMIME(), string(plan.Mode), ctx, resolved.DurationSec, "")
 	if err != nil {
 		media.Diagf("投屏失败 下发 设备=%s err=%v", dev.FriendlyName, err)
 		return nil, err
@@ -286,18 +298,54 @@ func (a *App) CastURL(udn, rawURL, titleOverride string) (*CastStatus, error) {
 	return status, nil
 }
 
+// playWithRetry 尝试调用 Play，遇到 TV 状态机转换中锁定时（如 UPnP 705 / 501 / Transition）
+// 进行有限次退避重试，避免下发后立即 Play 导致的偶发启动失败。
+func playWithRetry(ctx context.Context, renderer *dlna.Renderer, maxAttempts int, delay time.Duration) error {
+	var lastErr error
+	for i := 0; i < maxAttempts; i++ {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+		err := renderer.Play(ctx)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		errStr := err.Error()
+		isTransient := strings.Contains(errStr, "705") ||
+			strings.Contains(errStr, "501") ||
+			strings.Contains(errStr, "locked") ||
+			strings.Contains(errStr, "Transition")
+		if !isTransient {
+			return err
+		}
+	}
+	return lastErr
+}
+
 // startCast 向设备下发播放地址并登记投屏状态；失败时回收会话。
 // 调用方须持有 a.castMu，且不得持有 a.mu。
-func (a *App) startCast(dev *dlna.Device, srv *media.StreamServer, sessionID, title, playURL, streamMIME, mode string, ctx context.Context) (*CastStatus, error) {
+func (a *App) startCast(dev *dlna.Device, srv *media.StreamServer, sessionID, title, playURL, streamMIME, mode string, ctx context.Context, durationSec float64, subtitleURL string) (*CastStatus, error) {
 	// 先停掉上一次投屏（回收在 a.mu 之外完成）。
 	a.stopCast()
 
 	renderer := dlna.NewRenderer(dev)
-	if err := renderer.SetAVTransportURI(ctx, playURL, dlna.BuildDIDLMetadata(title, playURL, streamMIME)); err != nil {
+	metadata := dlna.BuildDIDL(dlna.DIDLOptions{
+		Title:       title,
+		URI:         playURL,
+		MIME:        streamMIME,
+		DurationSec: durationSec,
+		SubtitleURL: subtitleURL,
+	})
+	if err := renderer.SetAVTransportURI(ctx, playURL, metadata); err != nil {
 		srv.Remove(sessionID)
 		return nil, fmt.Errorf("下发播放地址失败: %w", err)
 	}
-	if err := renderer.Play(ctx); err != nil {
+	if err := playWithRetry(ctx, renderer, 3, 300*time.Millisecond); err != nil {
 		srv.Remove(sessionID)
 		return nil, fmt.Errorf("启动播放失败: %w", err)
 	}
@@ -493,12 +541,16 @@ func (a *App) SeekTo(sec float64) error {
 	if playURL == "" {
 		return errors.New("获取本机局域网地址失败")
 	}
-	metadata := dlna.BuildDIDLMetadata(castFile, playURL, "video/mp2t")
+	metadata := dlna.BuildDIDL(dlna.DIDLOptions{
+		Title: castFile,
+		URI:   playURL,
+		MIME:  "video/mp2t",
+	})
 	if err := renderer.SetAVTransportURI(ctx, playURL, metadata); err != nil {
 		media.Diagf("跳转失败 下发 %.1fs err=%v", sec, err)
 		return fmt.Errorf("重新下发播放地址失败: %w", err)
 	}
-	if err := renderer.Play(ctx); err != nil {
+	if err := playWithRetry(ctx, renderer, 3, 300*time.Millisecond); err != nil {
 		media.Diagf("跳转失败 播放 %.1fs err=%v", sec, err)
 		return err
 	}

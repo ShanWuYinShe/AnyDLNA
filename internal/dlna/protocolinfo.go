@@ -55,6 +55,15 @@ var mimeAliases = map[string]string{
 	"video/x-ms-asf":          "video/x-ms-wmv",
 	"video/flv":               "video/x-flv",
 	"video/x-flv":             "video/x-flv",
+	"video/hevc":              "video/hevc",
+	"video/h265":              "video/hevc",
+	"video/x-hevc":            "video/hevc",
+	"video/x-h265":            "video/hevc",
+	"audio/ac3":               "audio/ac3",
+	"audio/x-ac3":             "audio/ac3",
+	"audio/eac3":              "audio/eac3",
+	"audio/x-eac3":            "audio/eac3",
+	"audio/vnd.dolby.dd-raw":  "audio/ac3",
 }
 
 // NormalizeMIME 把 MIME 归一化为标准写法（小写、去参数、统一别名）。
@@ -138,6 +147,45 @@ func (c ProtocolCapabilities) SupportsMIME(mime string) bool {
 	}
 	for _, info := range c.Sink {
 		if info.MatchesMIME(mime) {
+			return true
+		}
+	}
+	return false
+}
+
+// SupportsHEVC 报告设备是否声明支持 HEVC/H.265 硬件视频解码。
+// 匹配方式：Sink 中明确声明 video/hevc 或其别名，或 profile/params 中带有 HEVC/H265 标识。
+func (c ProtocolCapabilities) SupportsHEVC() bool {
+	if !c.Queried {
+		return false
+	}
+	for _, info := range c.Sink {
+		mime := NormalizeMIME(info.MIME)
+		if mime == "video/hevc" {
+			return true
+		}
+		if strings.Contains(strings.ToUpper(info.Profile), "HEVC") || strings.Contains(strings.ToUpper(info.Profile), "H265") {
+			return true
+		}
+		pLower := strings.ToLower(info.Params)
+		if strings.Contains(pLower, "hevc") || strings.Contains(pLower, "h265") {
+			return true
+		}
+	}
+	return false
+}
+
+// SupportsAC3 报告设备是否声明支持 AC-3/Dolby Digital 音频解码。
+func (c ProtocolCapabilities) SupportsAC3() bool {
+	if !c.Queried {
+		return false
+	}
+	for _, info := range c.Sink {
+		mime := NormalizeMIME(info.MIME)
+		if mime == "audio/ac3" || mime == "audio/eac3" {
+			return true
+		}
+		if strings.Contains(strings.ToUpper(info.Profile), "AC3") || strings.Contains(strings.ToUpper(info.Profile), "DOLBY") {
 			return true
 		}
 	}

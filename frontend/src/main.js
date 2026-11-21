@@ -138,6 +138,7 @@ async function showDeviceCapabilities(d) {
     if (caps.supportsMp4) ok.push('MP4');
     if (caps.supportsMkv) ok.push('MKV');
     if (caps.supportsTs) ok.push('MPEG-TS');
+    if (caps.supportsHevc) ok.push('HEVC (H.265)');
     const total = (caps.videoMIMEs || []).length;
     el.innerHTML = '';
     const lead = document.createElement('div');
@@ -500,7 +501,8 @@ function renderPending() {
     const m = modeText(p);
     if (p.type === 'file') {
         const res = p.width ? `${p.width}×${p.height} · ` : '';
-        $('vMeta').textContent = `本地文件 · ${res}${p.videoCodec || '?'} + ${p.audioCodec || '无声'} · ${fmtClock(p.durationSec)} · ${p.sizeMB.toFixed(0)} MB`;
+        const sub = p.subtitleName ? ` · 字幕: ${p.subtitleName}` : '';
+        $('vMeta').textContent = `本地文件 · ${res}${p.videoCodec || '?'} + ${p.audioCodec || '无声'} · ${fmtClock(p.durationSec)} · ${p.sizeMB.toFixed(0)} MB${sub}`;
     } else {
         const from = p.extractor ? `来源 ${p.extractor}` : '在线视频';
         const dur = p.isLive ? '直播' : fmtClock(p.durationSec);

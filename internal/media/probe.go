@@ -31,6 +31,8 @@ type Info struct {
 	// 表现为电视长时间黑屏不播（实测 90 秒内进度始终为 0）。
 	// 非 MP4 容器恒为 true（不适用该限制）。
 	FastStart bool `json:"fast_start"`
+	// SubtitlePath 是同目录下匹配到的外挂字幕文件路径（如有）。
+	SubtitlePath string `json:"subtitle_path"`
 }
 
 // HasFFmpeg 报告 ffmpeg 是否可用（含自带目录与常见安装目录，见 ResolveTool）。
@@ -135,6 +137,10 @@ type DeviceCapabilities struct {
 	Queried bool
 	// MIMEs 是设备声明支持的媒体类型（已归一化为小写）。
 	MIMEs []string
+	// SupportsHEVC 表示设备是否声明支持 HEVC/H.265 硬件视频解码。
+	SupportsHEVC bool
+	// SupportsAC3 表示设备是否声明支持 AC3/Dolby 音频解码。
+	SupportsAC3 bool
 }
 
 // Supports 报告设备是否声明支持给定 MIME 类型。
@@ -248,26 +254,34 @@ type planInput struct {
 // planFor 是两种来源共用的决策逻辑。
 //
 // 决策顺序（能不解码就不解码）：
-//  1. 源视频不是 H.264 或为高比特深度：必须完整转码。
+//  1. 视频编码判断：H.264 8-bit 为通用基线；设备明确支持 HEVC 时，HEVC 也可直通。其余编码必须转码。
 //  2. 设备明确声明支持源容器，且音频可直通：投原文件（零开销，还能拖进度）。
 //     MP4 额外要求 faststart，否则设备要下载完整个文件才能起播。
 //  3. 否则换封装：视频无损直通，音频按需转码。
 func planFor(in planInput, caps DeviceCapabilities) Plan {
 	out := outputContainerFor(caps)
 
-	// 视频不是 H.264（HEVC/AV1/VP9/MPEG-4 等）：设备普遍无法解码，只能完整转码。
-	if !isH264(normalizeCodec(in.videoCodec)) {
+	normV := normalizeCodec(in.videoCodec)
+	normA := normalizeCodec(in.audioCodec)
+
+	isH264V := isH264(normV)
+	isHEVCV := isHEVC(normV)
+
+	// 视频编码判断：H.264 8-bit 为通用基线；设备明确支持 HEVC 时，HEVC 也可直通。
+	// 10-bit H.264（Hi10P）设备普遍无法硬解，需转码；HEVC 10-bit 现代 4K 电视普遍原生支持。
+	supportsVideo := false
+	if isH264V && !isHighBitDepth(in.pixFmt) {
+		supportsVideo = true
+	} else if isHEVCV && caps.SupportsHEVC {
+		supportsVideo = true
+	}
+
+	if !supportsVideo {
 		return Plan{Mode: OutputTranscode, Container: out}
 	}
 
-	// 10-bit H.264（Hi10P 等，动漫常见）设备普遍无法解码，
-	// 而重编码会顺带转为 8-bit，因此这类内容必须排除在换封装之外。
-	if isHighBitDepth(in.pixFmt) {
-		return Plan{Mode: OutputTranscode, Container: out}
-	}
-
-	// 能直接放进目标容器的音频只有 AAC，其余（Opus/MP3/AC3 等）需转码。
-	copyAudio := isAAC(normalizeCodec(in.audioCodec))
+	// 音频能否直通（AAC 始终可直通；MPEG-TS 下若设备支持 AC3/MP3 也可直通）
+	copyAudio := isAudioCopyable(normA, out, caps)
 
 	// 设备声明支持源容器，且音频能直通：直接投原文件，无需任何处理。
 	if in.allowDirect && copyAudio && in.sourceMIME != "" && caps.Supports(in.sourceMIME) {
@@ -285,6 +299,27 @@ func planFor(in planInput, caps DeviceCapabilities) Plan {
 
 	// 换封装：视频无损直通，音频按需转码。
 	return Plan{Mode: OutputRemux, Container: out, CopyVideo: true, CopyAudio: copyAudio}
+}
+
+// isHEVC 报告编码是否为 HEVC/H.265。
+func isHEVC(codec string) bool {
+	return codec == "hevc" || codec == "h265" || strings.HasPrefix(codec, "hev1") || strings.HasPrefix(codec, "hvc1")
+}
+
+// isAudioCopyable 报告音频在目标容器与设备能力下能否免转码直通。
+func isAudioCopyable(codec string, container OutputContainer, caps DeviceCapabilities) bool {
+	if isAAC(codec) {
+		return true
+	}
+	if container == ContainerMPEGTS {
+		if codec == "mp3" {
+			return true
+		}
+		if (codec == "ac3" || codec == "eac3") && caps.SupportsAC3 {
+			return true
+		}
+	}
+	return false
 }
 
 // normalizeCodec 归一化 ffprobe / yt-dlp 给出的编码名。
