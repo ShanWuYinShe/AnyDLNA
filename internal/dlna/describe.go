@@ -43,7 +43,9 @@ func Describe(ctx context.Context, client *http.Client, location string) (*Devic
 	}
 
 	dev := &Device{Location: location}
-	collectDevice(&desc.Devices[0], base, dev)
+	for i := range desc.Devices {
+		collectDevice(&desc.Devices[i], base, dev)
+	}
 	if !dev.HasAVTransport() {
 		return dev, nil // 不含 AVTransport 的设备（路由器等），由调用方过滤。
 	}

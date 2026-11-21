@@ -142,6 +142,41 @@ func (r *Renderer) SetVolume(ctx context.Context, volume int) error {
 	return err
 }
 
+// GetMute 查询渲染设备是否处于静音状态。
+func (r *Renderer) GetMute(ctx context.Context) (bool, error) {
+	svc := r.dev.Service(RenderingControlServiceType)
+	if svc == nil {
+		return false, fmt.Errorf("设备 %s 不支持 RenderingControl", r.dev.FriendlyName)
+	}
+	out, err := soapCall(ctx, r.client, svc.ControlURL, RenderingControlServiceType, "GetMute", [][2]string{
+		{"InstanceID", "0"},
+		{"Channel", "Master"},
+	})
+	if err != nil {
+		return false, err
+	}
+	val := strings.TrimSpace(out["CurrentMute"])
+	return val == "1" || strings.EqualFold(val, "true"), nil
+}
+
+// SetMute 设置渲染设备静音状态。
+func (r *Renderer) SetMute(ctx context.Context, mute bool) error {
+	svc := r.dev.Service(RenderingControlServiceType)
+	if svc == nil {
+		return fmt.Errorf("设备 %s 不支持 RenderingControl", r.dev.FriendlyName)
+	}
+	desired := "0"
+	if mute {
+		desired = "1"
+	}
+	_, err := soapCall(ctx, r.client, svc.ControlURL, RenderingControlServiceType, "SetMute", [][2]string{
+		{"InstanceID", "0"},
+		{"Channel", "Master"},
+		{"DesiredMute", desired},
+	})
+	return err
+}
+
 // FormatClock 把秒数格式化为 UPnP 的 H:MM:SS 时间文本。
 func FormatClock(seconds float64) string {
 	if seconds < 0 {

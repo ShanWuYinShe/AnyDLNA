@@ -815,7 +815,7 @@ func codecArgs(plan Plan, audioInput int) []string {
 	if plan.CopyAudio {
 		args = append(args, "-c:a", "copy")
 	} else {
-		args = append(args, "-c:a", "aac", "-b:a", "192k", "-ac", "2")
+		args = append(args, "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000")
 	}
 
 	return args

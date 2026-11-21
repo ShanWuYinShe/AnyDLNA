@@ -2,6 +2,8 @@ package dlna
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -75,5 +77,70 @@ func TestBuildDIDLFull(t *testing.T) {
 		if !strings.Contains(meta, want) {
 			t.Errorf("DIDL 缺少 %q: %s", want, meta)
 		}
+	}
+}
+
+// TestRendererMute 验证 GetMute 与 SetMute SOAP 调用的编解码行为。
+func TestRendererMute(t *testing.T) {
+	currentMute := "0"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		action := r.Header.Get("SOAPACTION")
+		if strings.Contains(action, "GetMute") {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`<?xml version="1.0"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Body>
+    <u:GetMuteResponse xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">
+      <CurrentMute>` + currentMute + `</CurrentMute>
+    </u:GetMuteResponse>
+  </s:Body>
+</s:Envelope>`))
+			return
+		}
+		if strings.Contains(action, "SetMute") {
+			currentMute = "1"
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`<?xml version="1.0"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Body>
+    <u:SetMuteResponse xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1"/>
+  </s:Body>
+</s:Envelope>`))
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer ts.Close()
+
+	dev := &Device{
+		FriendlyName: "TestTV",
+		Services: []Service{
+			{Type: RenderingControlServiceType, ControlURL: ts.URL},
+		},
+	}
+	renderer := NewRenderer(dev)
+	ctx := context.Background()
+
+	// 1. 初始为非静音
+	muted, err := renderer.GetMute(ctx)
+	if err != nil {
+		t.Fatalf("GetMute 失败: %v", err)
+	}
+	if muted {
+		t.Errorf("初始期望未静音，实际为静音")
+	}
+
+	// 2. 设置静音
+	if err := renderer.SetMute(ctx, true); err != nil {
+		t.Fatalf("SetMute 失败: %v", err)
+	}
+
+	// 3. 再次查询应为静音
+	muted, err = renderer.GetMute(ctx)
+	if err != nil {
+		t.Fatalf("GetMute 失败: %v", err)
+	}
+	if !muted {
+		t.Errorf("设置后期望为静音，实际为非静音")
 	}
 }

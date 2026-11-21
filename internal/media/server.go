@@ -1,6 +1,7 @@
 package media
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -279,6 +280,8 @@ func (s *StreamServer) serveTranscode(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveSubtitle 提供外挂字幕文件下载（/s/{id} 或 /s/{id}.ext）。
+// 自动清洗 UTF-8 BOM 并转码 GBK/GB2312 编码为 UTF-8，彻底避免电视端中文字幕乱码；
+// 对 ASS / SSA 特效字幕自动转为标准 SRT 格式。
 func (s *StreamServer) serveSubtitle(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/s/")
 	id := path
@@ -292,12 +295,20 @@ func (s *StreamServer) serveSubtitle(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	f, err := os.Open(sess.subtitlePath)
+	raw, err := os.ReadFile(sess.subtitlePath)
 	if err != nil {
 		http.Error(w, "字幕文件不可读", http.StatusGone)
 		return
 	}
-	defer f.Close()
+
+	clean := NormalizeSubtitleEncoding(raw)
+	ext := strings.ToLower(filepath.Ext(sess.subtitlePath))
+	if ext == ".ass" || ext == ".ssa" {
+		if srt := ConvertASSToSRT(clean); len(srt) > 0 {
+			clean = srt
+			ext = ".srt"
+		}
+	}
 
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
@@ -307,18 +318,20 @@ func (s *StreamServer) serveSubtitle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ext := strings.ToLower(filepath.Ext(sess.subtitlePath))
 	switch ext {
 	case ".vtt":
 		w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
 	case ".srt":
 		w.Header().Set("Content-Type", "text/srt; charset=utf-8")
-	case ".ass", ".ssa":
-		w.Header().Set("Content-Type", "text/x-ssa; charset=utf-8")
 	default:
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	}
-	http.ServeContent(w, r, filepath.Base(sess.subtitlePath), time.Now(), f)
+
+	var modTime time.Time
+	if fi, err := os.Stat(sess.subtitlePath); err == nil {
+		modTime = fi.ModTime()
+	}
+	http.ServeContent(w, r, filepath.Base(sess.subtitlePath)+ext, modTime, bytes.NewReader(clean))
 }
 
 // rateSummary 返回「平均速率 + 首字节耗时」的诊断后缀，用于投屏日志。

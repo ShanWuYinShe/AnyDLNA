@@ -550,6 +550,12 @@ function startControls(st) {
     window.go.main.App.GetVolume()
         .then((v) => { $('vol').value = v; })
         .catch(() => { /* 设备可能不支持音量控制 */ });
+    window.go.main.App.GetMute()
+        .then((m) => {
+            $('btnMute').textContent = m ? '已静音' : '音量';
+            $('btnMute').classList.toggle('danger', m);
+        })
+        .catch(() => { /* 设备可能不支持静音查询 */ });
 }
 
 async function poll() {
@@ -702,6 +708,15 @@ $('vol').onchange = () => call('SetVolume', Number($('vol').value)).catch(() => 
 $('vol').oninput = () => {
     clearTimeout(volTimer);
     volTimer = setTimeout(() => call('SetVolume', Number($('vol').value)).catch(() => {}), 300);
+};
+$('btnMute').onclick = async () => {
+    try {
+        const m = await call('ToggleMute');
+        $('btnMute').textContent = m ? '已静音' : '音量';
+        $('btnMute').classList.toggle('danger', m);
+    } catch (err) {
+        toast('静音切换失败: ' + err, 'error');
+    }
 };
 
 // ---------- 启动 ----------
