@@ -376,9 +376,16 @@ func TestOutputArgs(t *testing.T) {
 			if hasCopyA != c.wantCopyA {
 				t.Errorf("音频复制 = %v, 期望 %v（参数: %s）", hasCopyA, c.wantCopyA, joined)
 			}
-			// 不复制时必须给出对应的编码器。
-			if !c.wantCopyV && !containsSeq(args, "-c:v", "libx264") {
-				t.Errorf("未复制视频时应使用 libx264: %s", joined)
+			// 不复制时必须给出对应的 H.264 视频编码器（支持硬件加速或 libx264 软解）。
+			hasH264Enc := containsSeq(args, "-c:v", "libx264") ||
+				containsSeq(args, "-c:v", "h264_videotoolbox") ||
+				containsSeq(args, "-c:v", "h264_nvenc") ||
+				containsSeq(args, "-c:v", "h264_qsv") ||
+				containsSeq(args, "-c:v", "h264_amf") ||
+				containsSeq(args, "-c:v", "h264_vaapi") ||
+				containsSeq(args, "-c:v", "h264_mf")
+			if !c.wantCopyV && !hasH264Enc {
+				t.Errorf("未复制视频时应使用有效的 H.264 编码器: %s", joined)
 			}
 			if !c.wantCopyA && !containsSeq(args, "-c:a", "aac") {
 				t.Errorf("未复制音频时应使用 aac: %s", joined)
