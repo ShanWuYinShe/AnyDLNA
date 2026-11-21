@@ -7,20 +7,56 @@ import (
 )
 
 // LANIP 返回本机在局域网中的 IPv4 地址。
-// 通过对公共地址发起 UDP 拨接（不实际发包）让内核选择默认路由的出口地址，
-// 该地址即电视等局域网设备可达的本机地址。
+// 优先通过对公共地址发起 UDP 拨接（不实际发包）让内核选择默认路由的出口地址；
+// 若无公网路由（离线/纯局域网/防火墙阻止），则自动扫描本机非回环网卡选取活跃的局域网 IPv4。
 func LANIP() (string, error) {
 	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err == nil {
+		defer conn.Close()
+		if addr, ok := conn.LocalAddr().(*net.UDPAddr); ok && addr.IP.To4() != nil && !addr.IP.IsLoopback() && !addr.IP.IsUnspecified() {
+			return addr.IP.String(), nil
+		}
+	}
+	return fallbackLANIP()
+}
+
+// fallbackLANIP 扫描本机物理/局域网网络接口，选出处于运行状态的私有 IPv4 地址。
+func fallbackLANIP() (string, error) {
+	ifaces, err := net.Interfaces()
 	if err != nil {
 		return "", err
 	}
-	defer conn.Close()
-
-	addr, ok := conn.LocalAddr().(*net.UDPAddr)
-	if !ok {
-		return "", net.InvalidAddrError(conn.LocalAddr().String())
+	var candidate string
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip4 := ipnet.IP.To4()
+			if ip4 == nil || ip4.IsLoopback() || ip4.IsUnspecified() || ip4.IsLinkLocalUnicast() {
+				continue
+			}
+			// 优先选择标准私有网段（192.168.x.x, 10.x.x.x, 172.16-31.x.x）
+			if ip4.IsPrivate() {
+				return ip4.String(), nil
+			}
+			if candidate == "" {
+				candidate = ip4.String()
+			}
+		}
 	}
-	return addr.IP.String(), nil
+	if candidate != "" {
+		return candidate, nil
+	}
+	return "", &net.OpError{Op: "dial", Net: "udp", Err: net.UnknownNetworkError("未找到有效的局域网 IPv4 地址")}
 }
 
 // LANIPFor 返回本机与 targetHost 通信时使用的局域网 IPv4 地址。

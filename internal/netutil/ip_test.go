@@ -69,3 +69,15 @@ func TestLANIPFor(t *testing.T) {
 		t.Errorf("LANIPFor(\"127.0.0.1\") = %q; 期望回退到默认 %q", ipLoopback, defaultIP)
 	}
 }
+
+// TestFallbackLANIP 校验网卡枚举回退逻辑。
+func TestFallbackLANIP(t *testing.T) {
+	ip, err := fallbackLANIP()
+	if err != nil {
+		t.Skipf("本机无可用局域网网卡，跳过: %v", err)
+	}
+	parsed := net.ParseIP(ip)
+	if parsed == nil || parsed.To4() == nil || parsed.IsLoopback() || parsed.IsUnspecified() {
+		t.Fatalf("fallbackLANIP 返回非法 IP: %q", ip)
+	}
+}
