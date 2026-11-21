@@ -356,6 +356,7 @@ func (a *App) startCast(dev *dlna.Device, srv *media.StreamServer, sessionID, ti
 		URI:         playURL,
 		MIME:        streamMIME,
 		DurationSec: durationSec,
+		Direct:      mode == string(media.OutputDirect),
 		SubtitleURL: subtitleURL,
 	})
 	if err := renderer.SetAVTransportURI(ctx, playURL, metadata); err != nil {

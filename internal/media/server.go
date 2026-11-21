@@ -250,6 +250,12 @@ func (s *StreamServer) serveTranscode(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("RealTimeInfo.dlna.org", "DLNA.ORG_TLR=-1")
 
 	w.WriteHeader(http.StatusOK)
+
+	// 电视端起播前常发起 HEAD 请求嗅探响应头和状态码，直接返回避免拉起 ffmpeg 转码子进程
+	if r.Method == http.MethodHead {
+		return
+	}
+
 	// 主动 flush，让电视端尽快收到数据开始起播。
 	counting := &countingFlushWriter{w: &flushWriter{w: w, flushedAt: time.Now()}}
 	counting.flushHeader()

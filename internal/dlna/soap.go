@@ -8,10 +8,12 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // soapCall 向控制 URL 发起一次 UPnP SOAP 动作调用，返回响应参数名值表。
 // args 中的参数值会被 XML 转义，DIDL-Lite 等嵌套 XML 以纯文本嵌入即可。
+// 针对局域网瞬态 I/O 网络异常提供自动重试。
 func soapCall(ctx context.Context, client *http.Client, controlURL, serviceType, action string, args [][2]string) (map[string]string, error) {
 	var body bytes.Buffer
 	body.WriteString(`<?xml version="1.0" encoding="utf-8"?>` +
@@ -24,35 +26,52 @@ func soapCall(ctx context.Context, client *http.Client, controlURL, serviceType,
 		body.WriteString("</" + kv[0] + ">")
 	}
 	body.WriteString("</u:" + action + "></s:Body></s:Envelope>")
+	payload := body.Bytes()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, controlURL, &body)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", `text/xml; charset="utf-8"`)
-	req.Header.Set("SOAPACTION", fmt.Sprintf(`"%s#%s"`, serviceType, action))
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(150 * time.Millisecond):
+			}
+		}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("SOAP %s 请求失败: %w", action, err)
-	}
-	defer resp.Body.Close()
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, controlURL, bytes.NewReader(payload))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", `text/xml; charset="utf-8"`)
+		req.Header.Set("SOAPACTION", fmt.Sprintf(`"%s#%s"`, serviceType, action))
 
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("SOAP %s 读取响应失败: %w", action, err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		// UPnP 约定失败时以 500 返回 SOAP Fault，尝试解析出错误码。
-		if code, desc, perr := parseSOAPFault(bytes.NewReader(data)); perr == nil {
-			if code != "" {
-				return nil, fmt.Errorf("SOAP %s 失败: HTTP %d, UPnP 错误 %s: %s", action, resp.StatusCode, code, desc)
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("SOAP %s 请求失败: %w", action, err)
+			continue
+		}
+
+		data, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = fmt.Errorf("SOAP %s 读取响应失败: %w", action, err)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			// UPnP 约定失败时以 500 返回 SOAP Fault，尝试解析出错误码。
+			if code, desc, perr := parseSOAPFault(bytes.NewReader(data)); perr == nil {
+				if code != "" {
+					return nil, fmt.Errorf("SOAP %s 失败: HTTP %d, UPnP 错误 %s: %s", action, resp.StatusCode, code, desc)
+				}
+				return nil, fmt.Errorf("SOAP %s 失败: HTTP %d", action, resp.StatusCode)
 			}
 			return nil, fmt.Errorf("SOAP %s 失败: HTTP %d", action, resp.StatusCode)
 		}
-		return nil, fmt.Errorf("SOAP %s 失败: HTTP %d", action, resp.StatusCode)
+		return parseSOAPResponse(bytes.NewReader(data), action)
 	}
-	return parseSOAPResponse(bytes.NewReader(data), action)
+
+	return nil, lastErr
 }
 
 // parseSOAPResponse 解析 SOAP 响应 Body 中第一个元素的子元素为名值表。

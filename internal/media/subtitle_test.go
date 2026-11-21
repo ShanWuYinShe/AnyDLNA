@@ -125,3 +125,57 @@ Dialogue: 0,0:01:24.00,0:01:26.50,Default,,0,0,0,,{\c&H0000FF&}第二句普通�
 		t.Errorf("转换结果不符:\nGot:\n%s\nExpected:\n%s", string(srtBytes), expected)
 	}
 }
+
+// TestFindBestSubtitleMapFromOutput 验证 ffmpeg 流元数据解析中文字幕轨。
+func TestFindBestSubtitleMapFromOutput(t *testing.T) {
+	// 场景 1：多字幕且第二路为中文 (chi)
+	output1 := `
+Input #0, matroska,webm, from 'test.mkv':
+  Duration: 01:23:45.67, start: 0.000000, bitrate: 5432 kb/s
+  Stream #0:0(eng): Video: h264 (High)
+  Stream #0:1(eng): Audio: aac (LC)
+  Stream #0:2(eng): Subtitle: subrip
+    Metadata:
+      title           : English
+  Stream #0:3(chi): Subtitle: subrip
+    Metadata:
+      title           : Chinese
+`
+	if got := findBestSubtitleMapFromOutput(output1); got != "0:s:1" {
+		t.Errorf("场景1 应匹配中文字幕 0:s:1，实际得到 %q", got)
+	}
+
+	// 场景 2：语言为 und，但标题包含「简体中文」
+	output2 := `
+Input #0, matroska,webm, from 'test.mkv':
+  Stream #0:2(und): Subtitle: ass
+    Metadata:
+      title           : English (Forced)
+  Stream #0:3(und): Subtitle: ass
+    Metadata:
+      title           : 简体中文字幕
+`
+	if got := findBestSubtitleMapFromOutput(output2); got != "0:s:1" {
+		t.Errorf("场景2 应匹配标题中文 0:s:1，实际得到 %q", got)
+	}
+
+	// 场景 3：无中文字幕，回退到首条字幕
+	output3 := `
+Input #0, matroska,webm, from 'test.mkv':
+  Stream #0:2(eng): Subtitle: subrip
+  Stream #0:3(fre): Subtitle: subrip
+`
+	if got := findBestSubtitleMapFromOutput(output3); got != "0:s:0" {
+		t.Errorf("场景3 无中文时应回退 0:s:0，实际得到 %q", got)
+	}
+
+	// 场景 4：无任何字幕流
+	output4 := `
+Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'test.mp4':
+  Stream #0:0: Video: h264
+  Stream #0:1: Audio: aac
+`
+	if got := findBestSubtitleMapFromOutput(output4); got != "" {
+		t.Errorf("场景4 无字幕流应返回空串，实际得到 %q", got)
+	}
+}
