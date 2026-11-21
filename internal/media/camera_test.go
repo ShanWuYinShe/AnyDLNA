@@ -49,14 +49,14 @@ func TestParseAVFoundationDevices(t *testing.T) {
 	}
 }
 
-// TestCameraInputArgs 摄像头与屏幕的采集参数分支：
+// TestCameraInputArgs 摄像头与屏幕的采集参数分支（macOS avfoundation）：
 // 摄像头强制 720p；屏幕按原生分辨率采集、降采样到 720p 并保证偶数尺寸。
 func TestCameraInputArgs(t *testing.T) {
-	cam := cameraInputArgs(&CameraSource{VideoDevice: "0"})
+	cam := cameraInputArgsForOS(&CameraSource{VideoDevice: "0"}, "darwin")
 	if !containsAll(cam, []string{"-video_size", "1280x720"}) || containsAll(cam, []string{"-vf"}) {
 		t.Errorf("摄像头采集参数异常: %v", cam)
 	}
-	scr := cameraInputArgs(&CameraSource{VideoDevice: "1", Screen: true})
+	scr := cameraInputArgsForOS(&CameraSource{VideoDevice: "1", Screen: true}, "darwin")
 	if containsAll(scr, []string{"-video_size"}) {
 		t.Errorf("屏幕采集不应强制 video_size: %v", scr)
 	}
