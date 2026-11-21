@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -726,5 +727,68 @@ func TestPlayWithRetry(t *testing.T) {
 	}
 	if attempts != 3 {
 		t.Fatalf("期望重试 3 次，实际 %d 次", attempts)
+	}
+}
+
+// TestPollFallbackDuration 验证电视端返回时长为 0 时自动用探测记录的真实时长兜底。
+func TestPollFallbackDuration(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		action := ""
+		if strings.Contains(string(body), "GetTransportInfo") {
+			action = "GetTransportInfo"
+		} else if strings.Contains(string(body), "GetPositionInfo") {
+			action = "GetPositionInfo"
+		}
+		w.Header().Set("Content-Type", "text/xml")
+		switch action {
+		case "GetTransportInfo":
+			w.Write([]byte(`<?xml version="1.0"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Body>
+    <u:GetTransportInfoResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+      <CurrentTransportState>PLAYING</CurrentTransportState>
+    </u:GetTransportInfoResponse>
+  </s:Body>
+</s:Envelope>`))
+		case "GetPositionInfo":
+			// 模拟部分设备返回时长为 0:00:00 或 NOT_IMPLEMENTED
+			w.Write([]byte(`<?xml version="1.0"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Body>
+    <u:GetPositionInfoResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+      <RelTime>0:01:23</RelTime>
+      <TrackDuration>0:00:00</TrackDuration>
+    </u:GetPositionInfoResponse>
+  </s:Body>
+</s:Envelope>`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	app := NewApp()
+	dev := &dlna.Device{
+		FriendlyName: "TestTV",
+		Services: []dlna.Service{
+			{Type: dlna.AVTransportServiceType, ControlURL: ts.URL},
+		},
+	}
+	app.renderer = dlna.NewRenderer(dev)
+	app.castDuration = 3600.0 // 真实探测时长 1 小时
+
+	pos, err := app.Poll()
+	if err != nil {
+		t.Fatalf("Poll 失败: %v", err)
+	}
+	if pos.State != "PLAYING" {
+		t.Errorf("状态应为 PLAYING，实际得到 %s", pos.State)
+	}
+	if pos.PositionSec != 83 {
+		t.Errorf("播放位置应为 83 秒，实际得到 %f", pos.PositionSec)
+	}
+	if pos.DurationSec != 3600.0 {
+		t.Errorf("总时长应回退到已记录的 3600 秒，实际得到 %f", pos.DurationSec)
 	}
 }

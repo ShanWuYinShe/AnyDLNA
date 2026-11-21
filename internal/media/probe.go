@@ -193,10 +193,11 @@ func outputContainerFor(caps DeviceCapabilities) OutputContainer {
 
 // Plan 描述一路投屏应如何输出。
 type Plan struct {
-	Mode      OutputMode
-	Container OutputContainer // 封装输出的目标容器（直出时无意义）
-	CopyVideo bool            // 视频轨道直接复制（不重编码）
-	CopyAudio bool            // 音频轨道直接复制（不重编码）
+	Mode            OutputMode
+	Container       OutputContainer // 封装输出的目标容器（直出时无意义）
+	CopyVideo       bool            // 视频轨道直接复制（不重编码）
+	CopyAudio       bool            // 音频轨道直接复制（不重编码）
+	AudioTrackIndex int             // 选用的音频流相对索引（0 为默认首轨）
 	// DirectMIME 是直出时使用的媒体类型。
 	DirectMIME string
 }

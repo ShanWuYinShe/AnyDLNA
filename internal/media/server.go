@@ -435,7 +435,7 @@ func newSessionID() string {
 
 // MimeTypeFor 按文件扩展名返回直出应使用的 Content-Type。
 func MimeTypeFor(path string) string {
-	switch filepath.Ext(path) {
+	switch strings.ToLower(filepath.Ext(path)) {
 	case ".mp4", ".m4v":
 		return "video/mp4"
 	case ".mov":
@@ -446,8 +446,36 @@ func MimeTypeFor(path string) string {
 		return "video/webm"
 	case ".ts", ".mts", ".m2ts":
 		return mpegtsMIME
-	case ".avi":
+	case ".avi", ".divx":
 		return "video/x-msvideo"
+	case ".flv":
+		return "video/x-flv"
+	case ".wmv":
+		return "video/x-ms-wmv"
+	case ".asf":
+		return "video/x-ms-asf"
+	case ".3gp", ".3g2":
+		return "video/3gpp"
+	case ".mpg", ".mpeg", ".m2v", ".vob":
+		return "video/mpeg"
+	case ".ogv":
+		return "video/ogg"
+	case ".rm", ".rmvb":
+		return "video/vnd.rn-realvideo"
+	case ".mp3":
+		return "audio/mpeg"
+	case ".flac":
+		return "audio/flac"
+	case ".wav":
+		return "audio/wav"
+	case ".m4a", ".aac":
+		return "audio/mp4"
+	case ".ogg", ".oga":
+		return "audio/ogg"
+	case ".ape":
+		return "audio/x-ape"
+	case ".wma":
+		return "audio/x-ms-wma"
 	default:
 		return "application/octet-stream"
 	}
